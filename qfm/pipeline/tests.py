@@ -136,6 +136,11 @@ def factor_report(factor_df: pd.DataFrame, close: pd.DataFrame, horizon: int = 2
     mono = monotonicity(layer, direction)
     turn = turnover_ratio(cleaned, top_pct=0.1, rebalance=horizon)
 
+    # 滚动 IC 衰减监控：120 日均线 + 近期 IC（近 60 日）与全期对比
+    ic_rolling = ic.rolling(120, min_periods=30).mean() if len(ic) else pd.Series(dtype=float)
+    ic_recent = ic.tail(60).mean() if len(ic) >= 30 else np.nan
+    ic_decay = (ic_recent - summary["ic_mean"]) if pd.notna(ic_recent) else np.nan
+
     # 分年 IC
     ic_by_year = ic.groupby(ic.index.year).mean() if len(ic) else pd.Series(dtype=float)
 
@@ -146,6 +151,9 @@ def factor_report(factor_df: pd.DataFrame, close: pd.DataFrame, horizon: int = 2
         "monotonicity": mono,
         "turnover": turn,
         "ic_by_year": ic_by_year,
+        "ic_rolling": ic_rolling,
+        "ic_recent": ic_recent,
+        "ic_decay": ic_decay,
         "cleaned": cleaned,
         "fwd": fwd,
         "horizon": horizon,

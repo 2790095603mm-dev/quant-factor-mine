@@ -39,6 +39,7 @@ YJBB_COLS = {
     "净利润-同比增长": "profit_yoy",
     "营业总收入-季度环比增长": "rev_qoq",
     "净利润-季度环比增长": "profit_qoq",
+    "所处行业": "industry",
     "最新公告日期": "ann_date",
 }
 

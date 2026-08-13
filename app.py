@@ -199,52 +199,120 @@ def page_library():
 # ---------------------------------------------------------------------------
 def page_test(panel):
     st.markdown('<div class="qfm-sig"><h1>因子检验</h1>'
-                '<div class="sub">清洗 → IC / IC_IR / 分层 / 换手 → 一键导出 HTML 报告</div></div>',
+                '<div class="sub">清洗 → IC / IC_IR / 分层 / 换手 / 衰减监控 → 一键导出 HTML 报告</div></div>',
                 unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([2, 1, 1])
-    names = [f.name for f in list_factors()]
-    name = c1.selectbox("选择因子", names, help="自定义因子注册后也会出现在这里")
-    horizon = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2)
-    run = c3.button("运行检验", use_container_width=True)
+    import plotly.graph_objects as go
 
-    f = get_factor(name)
-    if run:
-        with st.status("检验中…", expanded=False) as status:
-            rep = factor_report(compute_factor(name, panel), panel.close,
-                                horizon=horizon, direction=f.direction)
-            status.update(label=f"✅ 完成：{name} · 前瞻 {horizon} 日", state="complete")
-        s = rep["ic_summary"]
-        mono = rep["monotonicity"]
-        verdict, vcolor = verdict_of(rep)
+    tab_single, tab_cmp = st.tabs(["单因子检验", "多因子对比"])
 
-        st.markdown(f"<span style='color:{vcolor};font-weight:600;font-size:15px'>{verdict}</span>"
-                    f"<span class='qfm-badge'>{f.family}</span>"
-                    f"<span class='qfm-badge'>{'正向' if f.direction=='positive' else '负向'}</span>"
-                    f"<div class='qfm-desc'>{f.description}</div>", unsafe_allow_html=True)
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric("平均 IC", f"{s['ic_mean']:+.4f}" if pd.notna(s["ic_mean"]) else "—")
-        k2.metric("IC_IR", f"{s['ic_ir']:.2f}" if pd.notna(s["ic_ir"]) else "—")
-        k3.metric("t 值", f"{s['ic_t']:.2f}" if pd.notna(s["ic_t"]) else "—")
-        k4.metric("IC 正占比", f"{s['pos_ratio']:.0%}" if pd.notna(s["pos_ratio"]) else "—")
-        k5.metric("组合换手", f"{rep['turnover']:.0%}" if pd.notna(rep["turnover"]) else "—")
-        k6.metric("多空价差", f"{mono['spread']:+.4f}" if pd.notna(mono["spread"]) else "—")
+    # ---------- Tab 1：单因子检验 ----------
+    with tab_single:
+        c1, c2, c3 = st.columns([2, 1, 1])
+        factor_names = [f.name for f in list_factors()]
+        name = c1.selectbox("选择因子", factor_names, help="自定义因子注册后也会出现在这里")
+        horizon = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2)
+        run = c3.button("运行检验", use_container_width=True)
 
-        st.plotly_chart(ic_chart(rep), use_container_width=True)
-        st.plotly_chart(layer_chart(rep, f.direction), use_container_width=True)
+        f = get_factor(name)
+        if run:
+            with st.status("检验中…", expanded=False) as status:
+                rep = factor_report(compute_factor(name, panel), panel.close,
+                                    horizon=horizon, direction=f.direction)
+                status.update(label=f"✅ 完成：{name} · 前瞻 {horizon} 日", state="complete")
+            s = rep["ic_summary"]
+            mono = rep["monotonicity"]
+            verdict, vcolor = verdict_of(rep)
 
-        with st.expander("分年 IC"):
-            y = rep["ic_by_year"]
-            st.dataframe(pd.DataFrame({"年份": y.index, "平均 IC": y.values.round(4)}), hide_index=True)
+            st.markdown(f"<span style='color:{vcolor};font-weight:600;font-size:15px'>{verdict}</span>"
+                        f"<span class='qfm-badge'>{f.family}</span>"
+                        f"<span class='qfm-badge'>{'正向' if f.direction=='positive' else '负向'}</span>"
+                        f"<div class='qfm-desc'>{f.description}</div>", unsafe_allow_html=True)
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("平均 IC", f"{s['ic_mean']:+.4f}" if pd.notna(s["ic_mean"]) else "—")
+            k2.metric("IC_IR", f"{s['ic_ir']:.2f}" if pd.notna(s["ic_ir"]) else "—")
+            k3.metric("t 值", f"{s['ic_t']:.2f}" if pd.notna(s["ic_t"]) else "—")
+            k4.metric("IC 正占比", f"{s['pos_ratio']:.0%}" if pd.notna(s["pos_ratio"]) else "—")
+            k5.metric("组合换手", f"{rep['turnover']:.0%}" if pd.notna(rep["turnover"]) else "—")
+            k6.metric("多空价差", f"{mono['spread']:+.4f}" if pd.notna(mono["spread"]) else "—")
 
-        html = generate_report(rep, name, f.family, f.description, f.direction,
-                               os.path.join("reports", f"{name}_h{horizon}.html"))
-        with open(html, encoding="utf-8") as fh:
-            st.download_button("⬇ 下载 HTML 报告", fh.read(), file_name=os.path.basename(html),
-                               mime="text/html", use_container_width=True)
-    else:
-        st.info("选择因子和前瞻天数后，点「运行检验」。")
-        if panel is not None:
-            st.caption(f"当前面板：{panel.close.shape[0]} 个交易日 × {panel.close.shape[1]} 只股票")
+            st.plotly_chart(ic_chart(rep), use_container_width=True)
+            st.plotly_chart(layer_chart(rep, f.direction), use_container_width=True)
+
+            with st.expander("分年 IC"):
+                y = rep["ic_by_year"]
+                st.dataframe(pd.DataFrame({"年份": y.index, "平均 IC": y.values.round(4)}), hide_index=True)
+
+            with st.expander("IC 衰减监控"):
+                fig3 = go.Figure()
+                fig3.add_trace(go.Scatter(x=rep["ic_rolling"].index, y=rep["ic_rolling"].values,
+                                          name="IC 120日均线", line=dict(color="#7C4DFF", width=2)))
+                fig3.add_hline(y=0, line=dict(color="#C9B8F0", width=1, dash="dash"))
+                fig3.update_layout(height=260, margin=dict(t=30), paper_bgcolor="rgba(0,0,0,0)",
+                                   plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#3B2E5E"))
+                st.plotly_chart(fig3, use_container_width=True)
+                d = rep["ic_decay"]
+                dc1, dc2 = st.columns(2)
+                dc1.metric("全期 IC", f"{s['ic_mean']:+.4f}")
+                dc2.metric("近 60 日 IC", f"{rep['ic_recent']:+.4f}" if pd.notna(rep["ic_recent"]) else "—")
+                if pd.notna(d):
+                    if d > 0.01:
+                        state_txt, state_col = "📈 增强（近端强于全期）", "#2E9E6B"
+                    elif d < -0.01:
+                        state_txt, state_col = "📉 衰减（近端弱于全期，警惕失效）", "#E5484D"
+                    else:
+                        state_txt, state_col = "➡️ 稳定", "#C9B8F0"
+                    st.markdown(f"<span style='color:{state_col};font-weight:600'>{state_txt}</span>"
+                                f"<span class='qfm-desc'>　滚动 120 日均线持续下滑且近 60 日 IC 明显低于全期 → 因子正在失效，"
+                                f"建议正交化、换窗口或移出因子池</span>", unsafe_allow_html=True)
+
+            html = generate_report(rep, name, f.family, f.description, f.direction,
+                                   os.path.join("reports", f"{name}_h{horizon}.html"))
+            with open(html, encoding="utf-8") as fh:
+                st.download_button("⬇ 下载 HTML 报告", fh.read(), file_name=os.path.basename(html),
+                                   mime="text/html", use_container_width=True)
+        else:
+            st.info("选择因子和前瞻天数后，点「运行检验」。")
+            if panel is not None:
+                st.caption(f"当前面板：{panel.close.shape[0]} 个交易日 × {panel.close.shape[1]} 只股票")
+
+    # ---------- Tab 2：多因子横向对比 ----------
+    with tab_cmp:
+        cmp_names = st.multiselect("对比因子（可多选）", [f.name for f in list_factors()],
+                                   default=["mom_20", "rev_20", "ep_ttm", "vol_20", "turnover_20"])
+        cmp_h = st.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="cmp_h")
+        if st.button("运行对比", use_container_width=True):
+            if not cmp_names:
+                st.error("至少选择一个因子")
+                return
+            rows = []
+            for nm in cmp_names:
+                f = get_factor(nm)
+                with st.status(f"检验 {nm}…", expanded=False) as stt:
+                    rep = factor_report(compute_factor(nm, panel), panel.close,
+                                        horizon=cmp_h, direction=f.direction)
+                    stt.update(label=f"✅ {nm}", state="complete")
+                s = rep["ic_summary"]
+                rows.append({
+                    "因子": nm, "家族": f.family, "方向": "正" if f.direction == "positive" else "负",
+                    "IC": s["ic_mean"], "IC_IR": s["ic_ir"], "t值": s["ic_t"],
+                    "近60日IC": rep["ic_recent"], "换手": rep["turnover"],
+                })
+            cmp_df = pd.DataFrame(rows)
+            cmp_df["|IC|"] = cmp_df["IC"].abs()
+            cmp_df = cmp_df.sort_values("|IC|", ascending=False).drop(columns="|IC|").reset_index(drop=True)
+            st.dataframe(cmp_df.style.format({"IC": "{:+.4f}", "IC_IR": "{:.2f}", "t值": "{:.2f}",
+                                              "近60日IC": "{:+.4f}", "换手": "{:.0%}"}),
+                         hide_index=True, use_container_width=True)
+            fig = go.Figure(go.Bar(
+                x=cmp_df["因子"], y=cmp_df["IC"],
+                marker_color=["#7C4DFF" if v >= 0 else "#FF6BA9" for v in cmp_df["IC"]],
+                text=cmp_df["IC"].round(4), textposition="outside"))
+            fig.add_hline(y=0, line=dict(color="#C9B8F0", width=1, dash="dash"))
+            fig.update_layout(title=f"因子 IC 横向对比（前瞻 {cmp_h} 日）", height=340, margin=dict(t=50),
+                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                              font=dict(color="#3B2E5E"))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("紫色=正向 IC，粉色=负向 IC。负向 IC 的因子（如 A 股反转）取反后即为有效信号。")
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +454,21 @@ def page_strategy(panel):
                 pos = last_hold[last_hold > 0].sort_values(ascending=False)
                 st.dataframe(pd.DataFrame({"股票代码": pos.index, "权重": pos.values})
                              .style.format({"权重": "{:.2%}"}), hide_index=True, use_container_width=True)
+
+        # 行业暴露
+        if bt.industry_exposure is not None and len(bt.industry_exposure):
+            st.markdown("**行业暴露（最近调仓日）**")
+            last_expo = bt.industry_exposure.iloc[-1].sort_values(ascending=False)
+            figx = go.Figure(go.Bar(
+                x=last_expo.index, y=last_expo.values, marker_color="#7C4DFF",
+                text=last_expo.round(3), texttemplate="%{text:.0%}", textposition="outside"))
+            figx.update_layout(height=300, margin=dict(t=30), paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#3B2E5E"),
+                               xaxis_tickangle=-30)
+            st.plotly_chart(figx, use_container_width=True)
+            hhi = float((last_expo ** 2).sum())
+            st.caption(f"行业集中度 HHI：**{hhi:.3f}**（1.0=全押一个行业；越低越分散）。"
+                       f"若某行业权重长期偏高，说明策略隐含行业赌注——面试可讲行业中性化作为下一步")
 
         # 绩效指标
         st.markdown("**绩效指标**")

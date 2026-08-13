@@ -20,6 +20,7 @@ class BacktestResult:
     trades: pd.DataFrame              # 交易记录（date, stock, side, amount, price）
     turnover: float                   # 年化单边换手
     cost_pct: float                   # 总成本占成交额比例
+    industry_exposure: pd.DataFrame | None = None  # 调仓日行业权重分布（date × 行业）
     params: dict = field(default_factory=dict)
 
 
@@ -61,6 +62,8 @@ def run_backtest(panel, score: pd.DataFrame, top_n: int = 50, rebalance: str = "
     prev_nav = 1.0
     prev_bench = 1.0
     weights = None  # 昨日收盘后的目标持仓（今日实际持仓）
+    ind_map = getattr(panel, "industry", None)
+    expo_rows = []  # 行业暴露（调仓日）
 
     for dt in dates:
         # ---- 基准 ----
@@ -87,6 +90,7 @@ def run_backtest(panel, score: pd.DataFrame, top_n: int = 50, rebalance: str = "
             mask = s.notna() & panel.volume.loc[dt].gt(0) & close_prev.loc[dt].notna()
             s = s[mask]
             new_w = pd.Series(0.0, index=close.columns)
+            picks = pd.Series(dtype=object)
             if len(s) >= top_n:
                 # 剔除当日涨停（近似买不进）
                 s = s[ret.loc[dt, s.index].fillna(0) < LIMIT_UP]
@@ -104,10 +108,19 @@ def run_backtest(panel, score: pd.DataFrame, top_n: int = 50, rebalance: str = "
             weights = new_w
             holdings.loc[dt] = new_w
 
+            # 行业暴露：调仓日持仓的行业权重分布
+            if ind_map is not None and len(picks) > 0:
+                inds = ind_map.loc[dt, picks.index]
+                valid = inds.dropna()
+                if len(valid):
+                    expo_rows.append((valid.value_counts() / len(valid)).rename(dt))
+
     years = max(len(dates) / 252, 1e-9)
+    industry_exposure = pd.DataFrame(expo_rows).fillna(0.0) if expo_rows else None
     return BacktestResult(
         nav=nav, bench_nav=bench_nav, holdings=holdings,
         trades=pd.DataFrame(trades), turnover=total_turn / years,
         cost_pct=total_cost / max(total_turn, 1e-9),
+        industry_exposure=industry_exposure,
         params={"top_n": top_n, "rebalance": rebalance, "cost": cost, "bench_mode": bench_mode},
     )

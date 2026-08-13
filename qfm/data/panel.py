@@ -31,6 +31,7 @@ class DataPanel:
     amount: pd.DataFrame = field(default_factory=pd.DataFrame)
     turnover: pd.DataFrame = field(default_factory=pd.DataFrame)
     mv_float: pd.DataFrame = field(default_factory=pd.DataFrame)  # 流通市值 = close × 流通股本
+    industry: pd.DataFrame = field(default_factory=pd.DataFrame)  # 行业（date×stock 字符串，按公告日对齐）
     fund: dict = field(default_factory=dict)  # {字段: date×stock DataFrame}
     fund_names: list = field(default_factory=list)
 
@@ -79,6 +80,22 @@ def build_panel(bars: pd.DataFrame, indicators: pd.DataFrame) -> DataPanel:
                 index="date", columns="stock", values="value", aggfunc="last"
             ).reindex(dates)
             p.fund_names.append(key)
+
+    # 行业：分类字段，按公告日对齐为字符串面板（date×stock）
+    if "industry" in ind.columns:
+        right = ind[["ann_date", "stock", "industry"]].rename(
+            columns={"ann_date": "date", "industry": "value"}
+        ).dropna(subset=["value"]).sort_values("date")
+        aligned = pd.merge_asof(
+            dates_long.sort_values("date"),
+            right,
+            on="date",
+            by="stock",
+            direction="backward",
+        )
+        p.industry = aligned.pivot_table(
+            index="date", columns="stock", values="value", aggfunc="last"
+        ).reindex(dates)
 
     # EPS_TTM 拼接：累计口径 → TTM 口径
     # ttm(非年报期) = 本期累计 + 去年年报 - 去年同期累计；年报期 ttm = 年报本身
