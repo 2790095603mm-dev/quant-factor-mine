@@ -369,14 +369,21 @@ def page_mine(panel):
     horizon = c1.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="mine_h")
     max_c = c2.selectbox("候选数限制", [36, 72, 144, 288], index=0,
                          help="36=单窗口集；越大跑得越久（每候选约 2 秒）")
+    save_trials = st.checkbox("保存试验矩阵（供策略回测页过拟合检验使用）", value=True,
+                              help="逐候选计算月频 TOP-30 组合收益，落盘 data_cache/trials/")
     if st.button("开始挖掘", use_container_width=True):
         prog = st.progress(0.0, text="准备…")
-        df = run_mining(panel, horizon=horizon, max_candidates=max_c,
-                        progress=lambda i, n, nm: prog.progress((i + 1) / n, text=f"{i+1}/{n} · {nm}"))
+        df, trials_meta = run_mining(panel, horizon=horizon, max_candidates=max_c,
+                                     save_trials=save_trials,
+                                     progress=lambda i, n, nm: prog.progress((i + 1) / n, text=f"{i+1}/{n} · {nm}"))
         st.success(f"挖掘完成：{len(df)} 个候选因子")
         st.dataframe(df.style.format({"IC": "{:+.4f}", "IC_IR": "{:.2f}", "t值": "{:.2f}",
                                       "正占比": "{:.0%}", "换手率": "{:.0%}"}),
                      use_container_width=True, height=420)
+        if trials_meta:
+            st.caption(f"📁 试验矩阵已保存：`{trials_meta['path']}`"
+                       f"（{trials_meta['n_trials']} 候选 × {trials_meta['T_periods']} 期月频收益 · "
+                       f"TOP{trials_meta['top_n']} 等权）")
         st.download_button("⬇ 下载排行榜 CSV", df.to_csv(index=False).encode("utf-8-sig"),
                            file_name="factor_leaderboard.csv", mime="text/csv")
 
@@ -406,6 +413,13 @@ def page_custom(panel):
             from qfm.data.panel import DataPanel
             ns["DataPanel"] = DataPanel
             exec(code, ns)
+            from qfm.pipeline.lookahead import scan_source
+            chk = scan_source(code)
+            if chk["leaks"]:
+                st.error("⚠️ 检测到未来函数泄漏模式：" + "；".join(chk["leaks"]) +
+                         "（因子将引用未来数据，检验结果不可信）")
+            elif chk["warnings"]:
+                st.warning("提示：" + "；".join(chk["warnings"]))
             st.success("注册成功，已自动进入检验流程")
             # 找出刚注册的因子（模板最后定义的函数名）
             new_names = [n for n in ns if n.startswith("my_") and callable(ns[n])]
