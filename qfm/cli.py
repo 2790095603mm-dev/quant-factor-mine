@@ -55,8 +55,8 @@ def cmd_mine(args):
         if (i + 1) % 10 == 0 or i == n - 1:
             print(f"  ⏳ 挖掘中 {i+1}/{n} ({name})")
 
-    df = run_mining(panel, horizon=args.horizon, max_candidates=args.max_candidates,
-                    progress=progress)
+    df, _ = run_mining(panel, horizon=args.horizon, max_candidates=args.max_candidates,
+                       progress=progress)
     print(f"\n🏆 TOP 10 因子排行榜 (前瞻 {args.horizon} 日, 总耗时 {time.time()-t0:.0f}s):")
     print(df.head(10).to_string(index=False))
 
