@@ -203,7 +203,7 @@ def page_test(panel):
                 unsafe_allow_html=True)
     import plotly.graph_objects as go
 
-    tab_single, tab_cmp = st.tabs(["单因子检验", "多因子对比"])
+    tab_single, tab_cmp, tab_ortho = st.tabs(["单因子检验", "多因子对比", "正交化"])
 
     # ---------- Tab 1：单因子检验 ----------
     with tab_single:
@@ -313,6 +313,49 @@ def page_test(panel):
                               font=dict(color="#3B2E5E"))
             st.plotly_chart(fig, use_container_width=True)
             st.caption("紫色=正向 IC，粉色=负向 IC。负向 IC 的因子（如 A 股反转）取反后即为有效信号。")
+
+    # ---------- Tab 3：正交化（QuantSkills factor-orthogonalize 方法论） ----------
+    with tab_ortho:
+        st.markdown("逐日截面 OLS 正交化：剥离行业 / 市值 / 风格暴露 → 残差因子"
+                    "（方法论源自 QuantSkills factor-orthogonalize）")
+        c1, c2, c3 = st.columns([2, 1, 1])
+        ortho_name = c1.selectbox("选择因子", [f.name for f in list_factors()], key="ortho_f")
+        ortho_h = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="ortho_h")
+        ortho_controls = c3.multiselect("剥离暴露", ["industry", "size", "style"],
+                                        default=["industry", "size", "style"],
+                                        format_func=lambda c: {"industry": "行业", "size": "市值",
+                                                               "style": "风格(beta/波动率)"}[c])
+        if st.button("运行正交化", use_container_width=True):
+            if not ortho_controls:
+                st.error("至少选择一项剥离暴露")
+                return
+            from qfm.orthogonalize import orthogonalize_factor
+            from qfm.portfolio.synthesis import factor_panel
+            with st.status("正交化中…", expanded=False) as status:
+                fdf = factor_panel(panel, [ortho_name])[ortho_name]
+                resid, diag = orthogonalize_factor(panel, fdf, controls=tuple(ortho_controls),
+                                                   horizon=ortho_h)
+                status.update(label=f"✅ 完成：{ortho_name} → 残差因子（{diag['days']} 日有效）",
+                              state="complete")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("IC 保留率", f"{diag['ic_retention']:.0%}" if pd.notna(diag["ic_retention"]) else "—",
+                      help="正交后 IC / 正交前 IC；越低说明信号越依赖被剥离暴露")
+            k2.metric("暴露 R²（前→后）", f"{diag['exposure_before']:.3f} → {diag['exposure_after']:.3f}",
+                      help="信号对控制变量回归 R²：正交后应≈0")
+            k3.metric("覆盖率（前→后）", f"{diag['coverage_before']:.0%} → {diag['coverage_after']:.0%}")
+            cmp = pd.DataFrame({
+                "指标": ["IC", "暴露 R²", "TOP10% 换手", "覆盖率"],
+                "正交前": [diag["ic_before"], diag["exposure_before"],
+                           diag["turnover_before"], diag["coverage_before"]],
+                "正交后": [diag["ic_after"], diag["exposure_after"],
+                           diag["turnover_after"], diag["coverage_after"]],
+            })
+            st.dataframe(cmp.style.format({"正交前": "{:.4f}", "正交后": "{:.4f}"}),
+                         hide_index=True, use_container_width=True)
+            if diag["days_skipped"]:
+                st.caption(f"跳过 {diag['days_skipped']} 日（截面样本 <30）")
+            st.download_button("⬇ 下载残差因子 CSV", resid.to_csv().encode("utf-8-sig"),
+                               file_name=f"{ortho_name}_residual.csv", mime="text/csv")
 
 
 # ---------------------------------------------------------------------------
