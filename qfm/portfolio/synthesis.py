@@ -58,11 +58,13 @@ def weight_by_ic(panel, factors: dict, horizon: int = 20) -> dict:
 
 
 def synthesize(panel, names: list, mode: str = "equal", horizon: int = 20,
-               orthogonalize: bool = False) -> tuple[pd.DataFrame, dict]:
+               orthogonalize: bool = False,
+               ortho_controls: tuple | None = None) -> tuple[pd.DataFrame, dict]:
     """因子合成主入口
 
     mode: equal=等权 | ic=IC加权 | icir=IC_IR加权
-    orthogonalize: 对流通市值(对数)回归取残差，消除规模暴露
+    orthogonalize: 逐日截面 OLS 正交化剥离暴露（行业/市值/风格/已有因子）
+    ortho_controls: ("industry","size","style") 子集；None 时默认 ("size",)（仅市值，向后兼容）
     返回 (综合得分 date×stock, 权重 dict)
     """
     factors = factor_panel(panel, names)
@@ -86,17 +88,8 @@ def synthesize(panel, names: list, mode: str = "equal", horizon: int = 20,
 
     score = sum(weights[n] * factors[n] for n in names)
     if orthogonalize:
-        mv = np.log(panel.mv_float)
-        # 逐期对 ln(市值) 回归，取残差（消除规模因子暴露）
-        resid = score.copy()
-        for dt in score.index:
-            y = score.loc[dt]
-            x = mv.loc[dt]
-            mask = y.notna() & x.notna()
-            if mask.sum() < 20:
-                continue
-            xx = np.column_stack([np.ones(mask.sum()), x[mask].values])
-            beta, *_ = np.linalg.lstsq(xx, y[mask].values, rcond=None)
-            resid.loc[dt, mask] = y[mask] - xx @ beta
-        score = resid
+        from qfm.orthogonalize import orthogonalize_factor
+
+        controls = ortho_controls or ("size",)
+        score, _diag = orthogonalize_factor(panel, score, controls=controls, horizon=horizon)
     return score, weights
