@@ -58,3 +58,13 @@ def my_idea(d: DataPanel) -> pd.DataFrame:
 - 全市场可选（约 5400 只，首次约 30-60 分钟，需耐心）
 - 数据缓存在 `data_cache/`，二次加载秒级；日线为前复权
 - 财务指标按"公告日期"对齐，避免未来函数
+
+## 方法论出处（QuantSkills 三技能融入）
+
+| 功能 | 方法论来源 | 独立实现依据 |
+|---|---|---|
+| 逐日截面 OLS 正交化 | QuantSkills `skill-factor-orthogonalize`（GPL-3.0） | 公开标准截面回归；行业/市值/风格暴露剥离 |
+| 回测过拟合检验 DSR/PBO/Haircut/MinTRL | QuantSkills `skill-backtest-overfit`（GPL-3.0） | Bailey & López de Prado (2012/2014)、Bailey et al. (2017)、Harvey & Liu (2015) 文献公式 |
+| 无未来函数检查 | QuantSkills `skill-quant-factor-skill-factory`（GPL-3.0） | 静态泄漏模式扫描 + 挖掘候选结构性判定 |
+
+本项目未拷贝上述仓库源码，算法按文献公式独立实现。
