@@ -433,13 +433,18 @@ def page_strategy(panel):
                 '<div class="sub">因子合成 → 组合回测 → 绩效分析 · 一体化流水线</div></div>',
                 unsafe_allow_html=True)
     st.markdown("**① 因子合成**")
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    c1, c2, c3 = st.columns([2, 1, 1])
     names = c1.multiselect("选择因子", [f.name for f in list_factors()],
                            default=["ep_ttm", "roe", "rev_20"])
     mode = c2.selectbox("权重模式", ["equal", "ic", "icir"],
                         format_func=lambda m: {"equal": "等权", "ic": "IC 加权", "icir": "IC_IR 加权"}[m])
     horizon = c3.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="strategy_h")
-    ortho = c4.checkbox("市值正交化", help="对流通市值回归取残差，消除规模暴露")
+    with st.expander("因子正交化（行业 / 市值 / 风格暴露剥离）"):
+        ortho = st.checkbox("启用正交化", value=False,
+                            help="逐日截面 OLS 残差化，消除所选暴露（方法论源自 QuantSkills factor-orthogonalize）")
+        ortho_controls = st.multiselect("剥离暴露", ["industry", "size", "style"], default=["size"],
+                                        format_func=lambda c: {"industry": "行业", "size": "市值",
+                                                               "style": "风格(beta/波动率)"}[c])
 
     st.markdown("**② 组合回测**")
     c5, c6, c7 = st.columns([1, 1, 1])
@@ -456,7 +461,8 @@ def page_strategy(panel):
                                    run_backtest, synthesize, yearly_perf)
         with st.status("策略流水线运行中…", expanded=True) as status:
             score, weights = synthesize(panel, names, mode=mode, horizon=horizon,
-                                        orthogonalize=ortho)
+                                        orthogonalize=ortho,
+                                        ortho_controls=tuple(ortho_controls) if ortho else None)
             status.update(label="✅ 因子合成完成 · 开始组合回测…")
             bt = run_backtest(panel, score, top_n=top_n, start=start_d, bench_mode=bench_mode)
             status.update(label=f"✅ 完成：策略净值 {bt.nav.iloc[-1]:.2f} vs 基准 {bt.bench_nav.iloc[-1]:.2f}",
@@ -528,6 +534,51 @@ def page_strategy(panel):
         st.markdown("**分年绩效**")
         st.dataframe(yp.style.format({"收益": "{:+.1%}", "最大回撤": "{:.1%}", "日胜率": "{:.0%}"}),
                      hide_index=True, use_container_width=True)
+
+        # 过拟合检验（QuantSkills skill-backtest-overfit 方法论）
+        st.markdown("**过拟合检验**（DSR / PBO / Haircut / MinTRL）")
+        monthly = bt.nav.resample("ME").last().pct_change().dropna()
+        if len(monthly) < 6:
+            st.warning("回测期过短（<6 个月），无法做统计显著性检验")
+        else:
+            from qfm.mining import latest_trials
+            from qfm.overfit import overfit_report
+
+            tl = latest_trials()
+            trials_df, trials_meta = (tl[0], tl[1]) if tl else (None, None)
+            default_n = int((trials_meta or {}).get("n_trials", 36))
+            n_trials = st.number_input("试验次数 n_trials（诚实申报：得到该结果前试过的全部参数/候选配置数）",
+                                       min_value=1, max_value=100000, value=default_n,
+                                       help="来自最近一次自动挖掘的候选数；少报 = 自欺，DSR/PBO 会偏乐观")
+            use_matrix = False
+            if trials_df is not None:
+                use_matrix = st.checkbox(
+                    f"使用最近一次挖掘试验矩阵（{trials_df.shape[1]} 候选 × {trials_df.shape[0]} 期，"
+                    f"{trials_meta['created_at'][:10]} 生成，horizon={trials_meta['horizon']}）",
+                    value=True)
+            rep = overfit_report(monthly.values, n_trials=int(n_trials),
+                                 trials_matrix=trials_df.values if (use_matrix and trials_df is not None) else None,
+                                 periods_per_year=12, haircut_method="holm")
+            vcolor = {"PASS": "#2E9E6B", "FAIL": "#E5484D", "INSUFFICIENT": "#C56A00"}[rep.verdict]
+            st.markdown(
+                f"<span style='color:{vcolor};font-weight:600;font-size:15px'>结论：{rep.verdict}"
+                f" — {'统计上可区分于多重检验噪声' if rep.passed else '存在过拟合 / 数据挖掘嫌疑'}</span>",
+                unsafe_allow_html=True)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("DSR 削减夏普", f"{rep.dsr:.2f}" if pd.notna(rep.dsr) else "—",
+                      help="P[真实 SR > 期望最大 SR_N]；≥0.95 才可信")
+            k2.metric("PBO 过拟合概率", f"{rep.pbo:.2f}" if pd.notna(rep.pbo) else "—",
+                      help="IS 最优策略在 OOS 落入下半区的概率；<0.5 才安全；无试验矩阵时为 —")
+            k3.metric("Haircut 夏普（年化）", f"{rep.sr_annual:.2f} → {rep.sr_annual_adjusted:.2f}",
+                      help=f"多重检验打折（{rep.haircut_method}，n_trials={rep.n_trials}）")
+            k4.metric("MinTRL 最小样本期数", f"{rep.minimum_track_record_length:.0f}"
+                      if np.isfinite(rep.minimum_track_record_length) else "∞",
+                      help="该夏普达到统计显著（PSR≥95%）所需的最少期数")
+            if rep.reasons:
+                st.warning("未通过项：" + "；".join(rep.reasons))
+            if rep.dsr_degraded:
+                st.caption("⚠️ 未提供试验矩阵，DSR 为退化估计（偏宽松）。精确 PBO 需先在「自动挖掘」页跑一次并勾选保存试验矩阵。")
+
         st.download_button("⬇ 下载净值 CSV", bt.nav.to_csv().encode("utf-8-sig"),
                            file_name="strategy_nav.csv", mime="text/csv")
 
