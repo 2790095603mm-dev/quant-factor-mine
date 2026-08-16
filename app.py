@@ -203,7 +203,7 @@ def page_test(panel):
                 unsafe_allow_html=True)
     import plotly.graph_objects as go
 
-    tab_single, tab_cmp, tab_ortho = st.tabs(["单因子检验", "多因子对比", "正交化"])
+    tab_single, tab_cmp, tab_ortho, tab_ml = st.tabs(["单因子检验", "多因子对比", "正交化", "ML 合成"])
 
     # ---------- Tab 1：单因子检验 ----------
     with tab_single:
@@ -356,6 +356,60 @@ def page_test(panel):
                 st.caption(f"跳过 {diag['days_skipped']} 日（截面样本 <30）")
             st.download_button("⬇ 下载残差因子 CSV", resid.to_csv().encode("utf-8-sig"),
                                file_name=f"{ortho_name}_residual.csv", mime="text/csv")
+
+    # ---------- Tab 4：ML 合成因子（LightGBM walk-forward） ----------
+    with tab_ml:
+        st.markdown("LightGBM walk-forward 滚动训练：把现有因子库**非线性合成**成一个新因子"
+                    "（仅输出样本外预测，结构性无未来函数）")
+        c1, c2, c3 = st.columns([2, 1, 1])
+        ml_names = c1.multiselect("特征因子", [f.name for f in list_factors()],
+                                  default=[f.name for f in list_factors()][:10], key="ml_names")
+        ml_h = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="ml_h")
+        ml_folds = c3.selectbox("fold 数", [2, 4, 6], index=1, key="ml_folds",
+                                help="越多训练越充分，耗时线性增加")
+        ml_cutoff = st.text_input("训练截止日（此后的日期为样本外预测区间）", "2023-12-31", key="ml_cutoff")
+        if st.button("训练并合成", use_container_width=True):
+            if not ml_names:
+                st.error("至少选择一个特征因子")
+                return
+            from qfm.ml_synthesizer import synthesize_ml_factor
+
+            prog = st.progress(0.0, text="准备数据…")
+            try:
+                pred, meta = synthesize_ml_factor(
+                    panel, names=ml_names, horizon=ml_h, train_cutoff=ml_cutoff,
+                    n_folds=ml_folds,
+                    progress=lambda i, n, msg: prog.progress((i + 1) / n, text=msg))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"训练失败：{e}")
+                return
+            st.success(f"合成完成：样本外预测 {len(pred)} 个交易日 × {pred.shape[1]} 只股票"
+                       f"（fold={meta['n_folds']}，区间 {meta['pred_start']} ~ {meta['pred_end']}）")
+            rep = factor_report(pred, panel.close, horizon=ml_h, direction="positive")
+            s = rep["ic_summary"]
+            k1, k2, k3 = st.columns(3)
+            k1.metric("样本外 IC", f"{s['ic_mean']:+.4f}" if pd.notna(s["ic_mean"]) else "—")
+            k2.metric("IC_IR", f"{s['ic_ir']:.2f}" if pd.notna(s["ic_ir"]) else "—")
+            k3.metric("有效天数", s["n_days"])
+            st.plotly_chart(ic_chart(rep), use_container_width=True)
+            st.plotly_chart(layer_chart(rep, "positive"), use_container_width=True)
+
+            imp = meta["importance_top"]
+            figi = go.Figure(go.Bar(
+                x=list(imp.values()), y=[k.replace("f_", "") for k in imp],
+                orientation="h", marker_color="#7C4DFF"))
+            figi.update_layout(title="特征重要性 TOP10", height=320, margin=dict(t=40),
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                               font=dict(color="#3B2E5E"))
+            st.plotly_chart(figi, use_container_width=True)
+
+            from qfm.factors import register_factor
+
+            register_factor(name="ml_synth", family="机器学习",
+                            description=f"LightGBM walk-forward 合成（{ml_h}日前瞻，训练截止 {ml_cutoff}）",
+                            direction="positive")(lambda d: pred)
+            st.caption(f"✅ 已注册为因子 `ml_synth`，可直接在「策略回测」页选择。"
+                       f"预测区间 {meta['pred_start']} ~ {meta['pred_end']}——回测起点请设在此区间内或之后。")
 
 
 # ---------------------------------------------------------------------------
