@@ -111,3 +111,15 @@ def test_factor_report_partial_index_alignment(panel):
     ic_partial = rep_partial["ic_series"].dropna()
     assert ic_partial.index.isin(partial.index).all()
     assert np.allclose(ic_partial.values, ic_full.loc[ic_partial.index].values, atol=1e-12)
+
+
+def test_factor_report_subset_columns_no_crash(panel):
+    """回归：因子股票列少于 close 列时（如个股缺数据）不崩溃，IC 在共同股票上计算"""
+    from qfm.factors import compute_factor
+    from qfm.pipeline.tests import factor_report
+
+    full = compute_factor("mom_20", panel)
+    subset = full.iloc[:, :40]
+    rep = factor_report(subset, panel.close, horizon=5, direction="positive")
+    s = rep["ic_summary"]
+    assert pd.notna(s["ic_mean"])

@@ -127,10 +127,10 @@ def factor_report(factor_df: pd.DataFrame, close: pd.DataFrame, horizon: int = 2
     """单因子完整检验：清洗 → IC → 分层 → 换手 → 汇总（pipeline 主入口）"""
     from qfm.pipeline.clean import clean_factor
 
-    # 索引对齐防御：compute_ic/layer_test 按位置计算，部分日期因子（如 ML 样本外预测）
-    # 必须重索引到 close 全轴，否则会与错误日期的 forward return 错位（静默失真）
-    if not factor_df.index.equals(close.index):
-        factor_df = factor_df.reindex(close.index)
+    # 索引对齐防御：compute_ic/layer_test 按位置计算，部分日期/部分股票的因子
+    # （如 ML 样本外预测、个股缺数据）必须重索引到 close 全轴，否则与错误行/列错位
+    if not factor_df.index.equals(close.index) or not factor_df.columns.equals(close.columns):
+        factor_df = factor_df.reindex(index=close.index, columns=close.columns)
     cleaned = clean_factor(factor_df)
     fwd = forward_returns(close, horizon)
 

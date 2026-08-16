@@ -68,3 +68,7 @@ def my_idea(d: DataPanel) -> pd.DataFrame:
 | 无未来函数检查 | QuantSkills `skill-quant-factor-skill-factory`（GPL-3.0） | 静态泄漏模式扫描 + 挖掘候选结构性判定 |
 
 本项目未拷贝上述仓库源码，算法按文献公式独立实现。
+
+## 机器学习合成因子
+
+因子检验页「ML 合成」Tab：LightGBM walk-forward 滚动训练把现有因子库非线性合成为一个新因子（仅样本外预测，结构性无未来函数）。合成后自动注册为 `ml_synth` 因子，可直接进入策略回测页参与合成与回测。
