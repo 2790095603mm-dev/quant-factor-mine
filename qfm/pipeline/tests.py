@@ -123,7 +123,7 @@ def turnover_ratio(factor: pd.DataFrame, top_pct: float = 0.1, rebalance: int = 
 
 
 def factor_report(factor_df: pd.DataFrame, close: pd.DataFrame, horizon: int = 20,
-                  direction: str = "positive") -> dict:
+                  direction: str = "positive", lookahead: dict | None = None) -> dict:
     """单因子完整检验：清洗 → IC → 分层 → 换手 → 汇总（pipeline 主入口）"""
     from qfm.pipeline.clean import clean_factor
 
@@ -157,4 +157,5 @@ def factor_report(factor_df: pd.DataFrame, close: pd.DataFrame, horizon: int = 2
         "cleaned": cleaned,
         "fwd": fwd,
         "horizon": horizon,
+        **({"lookahead": lookahead} if lookahead is not None else {}),
     }
