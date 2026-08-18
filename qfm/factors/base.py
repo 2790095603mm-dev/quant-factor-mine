@@ -9,7 +9,7 @@ import pandas as pd
 
 from qfm.data.panel import DataPanel
 
-FAMILIES = ["价值", "质量", "成长", "动量反转", "波动", "流动性", "规模"]
+FAMILIES = ["价值", "质量", "成长", "动量反转", "波动", "流动性", "规模", "实战"]
 
 
 @dataclass

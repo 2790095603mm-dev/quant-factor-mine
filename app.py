@@ -184,7 +184,7 @@ def page_library():
                 '<div class="sub">31 个内置因子 · 7 大家族 · 点左侧「因子检验」逐个验证</div></div>',
                 unsafe_allow_html=True)
     c1, c2 = st.columns([1, 2])
-    family = c1.selectbox("家族筛选", ["全部"] + [f for f in ["价值", "质量", "成长", "动量反转", "波动", "流动性", "规模"]])
+    family = c1.selectbox("家族筛选", ["全部"] + [f for f in ["价值", "质量", "成长", "动量反转", "波动", "流动性", "规模", "实战"]])
     keyword = c2.text_input("关键词搜索", placeholder="如：动量 / roe / 换手")
     fs = list_factors(family if family != "全部" else None)
     if keyword:
