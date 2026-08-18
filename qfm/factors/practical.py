@@ -1,11 +1,14 @@
-"""「实战」家族因子（行业格局 / 情绪类，2026-08）：6 个因子
+"""「实战」家族因子（行业格局 / 情绪类，2026-08）：9 个因子
 
 - 行业级（算出行业值后广播给行业内每只股票）：lead_cap / vol_div / volret_cov / lead_ret_pre
-- 个股级：range_bias / gap_sent
+- 个股级：range_bias / gap_sent / res_mom / sent_beta / rel_turn
 
 公式按公开口径独立实现；全部基于 T 日已知数据（结构性无未来函数）。
 注：lead_cap / lead_ret_pre 的"龙头"取行业内流通市值前 3（mv_float 近似总市值）；
 行业成分过少（<3 只）时 top3 退化为全行业，数值失真，建议在成分 ≥5 的行业上解读。
+sent_beta 的"市场情绪指数"公式未定义，采用文档化代理：20 日平滑市场广度（涨家数-跌家数）。
+市场级指标（ADL 市场广度累计 / Disp 全市场振幅分歧）不注册为个股因子——横截面 IC 无法计算，
+如需市场择时请走策略层功能。
 """
 
 from __future__ import annotations
@@ -98,3 +101,29 @@ def range_bias(d):
                  "正跳空=乐观预期前置，负跳空=悲观扩散）", "positive")
 def gap_sent(d):
     return (d.open - d.close.shift(1)) / d.close.shift(1)
+
+
+@register_factor("res_mom", "实战",
+                 "滚动残差动量 = 60日动量 - 其20日滚动均值（剥离动量长期中枢，捕捉短期情绪边际偏离；"
+                 "实证：偏离越高短期收益越负（A股反转），方向为负）", "negative")
+def res_mom(d):
+    mom60 = d.close.pct_change(60, fill_method=None)
+    return mom60 - mom60.rolling(20).mean()
+
+
+@register_factor("sent_beta", "实战",
+                 "情绪Beta = 个股收益对市场情绪指数的60日滚动回归系数（情绪弹性；"
+                 "市场情绪代理=20日平滑市场广度(涨家数-跌家数)，公式中 MarketSent 未定义，此为文档化代理）", "positive")
+def sent_beta(d):
+    ret = d.close.pct_change(fill_method=None)
+    breadth = (ret > 0).sum(axis=1) - (ret < 0).sum(axis=1)   # 市场广度
+    sent = breadth.rolling(20).mean()                          # 平滑为市场情绪代理
+    var_s = sent.rolling(60).var()
+    return ret.rolling(60).cov(sent).div(var_s, axis=0)
+
+
+@register_factor("rel_turn", "实战",
+                 "相对换手率 = 当日换手 / 过去20日换手均值（相对近期中枢的倍数；"
+                 ">1.8 放量情绪爆发，<0.5 持续缩量）", "positive")
+def rel_turn(d):
+    return d.turnover / d.turnover.rolling(20).mean()

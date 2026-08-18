@@ -7,7 +7,8 @@ import numpy as np
 from qfm.factors import compute_factor, list_factors
 from qfm.pipeline.lookahead import scan_source
 
-NEW_FACTORS = ["lead_cap", "vol_div", "volret_cov", "lead_ret_pre", "range_bias", "gap_sent"]
+NEW_FACTORS = ["lead_cap", "vol_div", "volret_cov", "lead_ret_pre", "range_bias", "gap_sent",
+               "res_mom", "sent_beta", "rel_turn"]
 
 
 def test_all_practical_factors_registered():
@@ -47,6 +48,29 @@ def test_gap_sent_formula(panel):
     fdf = compute_factor("gap_sent", panel)
     expect = (panel.open - panel.close.shift(1)) / panel.close.shift(1)
     assert np.allclose(fdf.values, expect.values, equal_nan=True)
+
+
+def test_rel_turn_formula(panel):
+    fdf = compute_factor("rel_turn", panel)
+    expect = panel.turnover / panel.turnover.rolling(20).mean()
+    assert np.allclose(fdf.values, expect.values, equal_nan=True)
+
+
+def test_res_mom_formula(panel):
+    fdf = compute_factor("res_mom", panel)
+    mom60 = panel.close.pct_change(60)
+    expect = mom60 - mom60.rolling(20).mean()
+    assert np.allclose(fdf.values, expect.values, equal_nan=True)
+
+
+def test_sent_beta_variation_across_stocks(panel):
+    """情绪 Beta 必须是个股异质（同日截面不止一个取值），且回归系数有限"""
+    fdf = compute_factor("sent_beta", panel)
+    dt = panel.close.index[150]
+    row = fdf.loc[dt].dropna()
+    assert len(row) > 10
+    assert row.nunique() > 1                    # 个股间 beta 有差异
+    assert np.isfinite(row).all()
 
 
 def test_range_bias_formula(panel):
