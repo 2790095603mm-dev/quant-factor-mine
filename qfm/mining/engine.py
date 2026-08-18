@@ -1,10 +1,17 @@
-"""自动挖掘引擎：基础指标 × 窗口 × 变换 → 批量候选 → 批量检验 → TOP 排行榜"""
+"""自动挖掘引擎：特征池 × 变换 → 批量候选（流式）→ 批量检验 → TOP 排行榜
+
+v2（2026-08-18）：候选空间从"基础指标×窗口×变换"(48) 扩展到
+"49 个已注册因子 × 4 种变换 + 基础指标窗口集"(≈244)，并改为流式生成：
+逐候选"生成→检验→丢弃"，峰值内存 ≈ 单候选矩阵，避免全量囤积（旧版 288 候选 ≈ 16GB）。
+负向因子（direction=negative）在入池时取反，统一"值越大越好"口径，排行榜 |IC| 才可公平比较。
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from qfm.pipeline.tests import factor_report
@@ -14,6 +21,14 @@ TRANSFORMS = {
     "mean": lambda s, w: s.rolling(w).mean(),       # 窗口均值（水平）
     "std": lambda s, w: s.rolling(w).std(),         # 窗口波动（变异）
     "mom": lambda s, w: s.rolling(w).sum(),         # 窗口累计（对收益=动量，对量=累积量）
+}
+
+# v2 因子级变换模板：对已注册因子做截面/时序变换
+V2_TRANSFORMS = {
+    "raw": lambda s: s,                                                    # 原值
+    "rank": lambda s: s.rank(axis=1),                                      # 截面排名（无量纲）
+    "zscore": lambda s: (s - s.mean(axis=1)) / s.std(axis=1).replace(0, np.nan),  # 截面标准化
+    "detrend20": lambda s: s - s.rolling(20).mean(),                       # 去 20 日均值（时序偏离）
 }
 
 
@@ -28,13 +43,55 @@ def base_indicators(panel) -> dict[str, pd.DataFrame]:
 
 
 def generate_candidates(panel, windows=WINDOWS) -> dict[str, pd.DataFrame]:
-    """生成候选因子：基础指标 × 窗口 × 变换"""
+    """生成候选因子：基础指标 × 窗口 × 变换（v1 保留，兼容调用方）"""
     cands = {}
     for bname, bdf in base_indicators(panel).items():
         for w in windows:
             for tname, tfunc in TRANSFORMS.items():
                 cands[f"{bname}_{tname}_{w}"] = tfunc(bdf, w)
     return cands
+
+
+def _feature_pool(panel, names=None):
+    """特征池（惰性）：已注册因子逐个产出 (名, date×stock)，负向因子取反"""
+    from qfm.factors import list_factors
+
+    fs = list_factors()
+    if names:
+        fs = [f for f in fs if f.name in names]
+    for f in fs:
+        try:
+            fdf = f.func(panel)
+        except Exception:  # noqa: BLE001 个别因子缺数据时跳过，不阻塞整轮挖掘
+            continue
+        yield f.name, (-fdf if f.direction == "negative" else fdf)
+
+
+def generate_candidates_v2(panel, names=None, transforms=None):
+    """v2 候选生成器（流式）：特征池 × 因子级变换 + 基础指标窗口集。
+
+    逐候选 yield (候选名, date×stock 矩阵)，不囤积内存。
+    候选名格式：`{特征}__{变换}`（基础指标候选沿用 `{指标}_{变换}_{窗口}`）。
+    """
+    ts = tuple(transforms) if transforms else tuple(V2_TRANSFORMS)
+    for fname, fdf in _feature_pool(panel, names):
+        for t in ts:
+            yield f"{fname}__{t}", V2_TRANSFORMS[t](fdf)
+    for bname, bdf in base_indicators(panel).items():
+        for w in WINDOWS:
+            for tname, tfunc in TRANSFORMS.items():
+                yield f"{bname}_{tname}_{w}", tfunc(bdf, w)
+
+
+def _candidate_total(panel, names=None, transforms=None) -> int:
+    """候选总数（进度条用）：特征池数 × 变换数 + 基础窗口集"""
+    from qfm.factors import list_factors
+
+    fs = list_factors()
+    if names:
+        fs = [f for f in fs if f.name in names]
+    ts = tuple(transforms) if transforms else tuple(V2_TRANSFORMS)
+    return len(fs) * len(ts) + 4 * len(WINDOWS) * len(TRANSFORMS)
 
 
 TRIALS_DIR = str(Path(__file__).resolve().parents[2] / "data_cache" / "trials")
@@ -79,26 +136,29 @@ def latest_trials(trials_dir: str | None = None) -> tuple[pd.DataFrame, dict] | 
 
 def run_mining(panel, horizon: int = 20, max_candidates: int | None = None,
                progress=None, save_trials: bool = True, top_n: int = 30,
-               trials_dir: str | None = None) -> tuple[pd.DataFrame, dict | None]:
-    """批量检验全部候选，返回 (排行榜 DataFrame, 试验矩阵元信息或 None)
+               trials_dir: str | None = None, feature_names=None,
+               transforms=None) -> tuple[pd.DataFrame, dict | None]:
+    """批量检验全部候选（v2 流式），返回 (排行榜 DataFrame, 试验矩阵元信息或 None)
 
-    排行榜按 |IC| 降序，含「无未来函数」列（挖掘候选结构性安全）；
+    排行榜按 |IC| 降序，含「无未来函数」列与「变换」列；
     save_trials=True 时逐候选计算月频 TOP-N 组合收益，保存 T×N 试验矩阵。
     """
-    cands = generate_candidates(panel)
-    if max_candidates:
-        cands = dict(list(cands.items())[:max_candidates])
+    n_total = _candidate_total(panel, feature_names, transforms)
+    n_cap = min(max_candidates, n_total) if max_candidates else n_total
 
     rows = []
     trial_series: dict[str, pd.Series] = {}
-    n = len(cands)
-    for i, (name, fdf) in enumerate(cands.items()):
+    for i, (name, fdf) in enumerate(generate_candidates_v2(panel, feature_names, transforms)):
+        if i >= n_cap:
+            break
         if progress:
-            progress(i, n, name)
+            progress(i, n_cap, name)
         rep = factor_report(fdf, panel.close, horizon=horizon, direction="positive")
         s = rep["ic_summary"]
+        transform = name.split("__")[-1] if "__" in name else "—"
         rows.append({
             "因子": name,
+            "变换": transform,
             "IC": s["ic_mean"],
             "IC_IR": s["ic_ir"],
             "t值": s["ic_t"],
@@ -118,7 +178,7 @@ def run_mining(panel, horizon: int = 20, max_candidates: int | None = None,
     meta = None
     if save_trials and trial_series:
         matrix = pd.DataFrame(trial_series).dropna(how="all")
-        meta = {"horizon": horizon, "top_n": top_n, "max_candidates": len(cands)}
+        meta = {"horizon": horizon, "top_n": top_n, "max_candidates": len(rows)}
         path = save_trials_matrix(matrix, meta, trials_dir)
         meta = {**meta, "path": path, "n_trials": int(matrix.shape[1]),
                 "T_periods": int(matrix.shape[0])}

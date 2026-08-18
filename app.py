@@ -378,8 +378,8 @@ def page_mine(panel, mode: str = "批量挖掘"):
         return
     c1, c2 = st.columns([1, 1])
     horizon = c1.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="mine_h")
-    max_c = c2.selectbox("候选数限制", [36, 72, 144, 288], index=0,
-                         help="36=单窗口集；越大跑得越久（每候选约 2 秒）")
+    max_c = c2.selectbox("候选数限制", [60, 120, 244, 500], index=2,
+                         help="v2 全量 244 = 49 个因子 × 4 种变换 + 基础窗口集；每候选约 2 秒（流式计算，内存占用低）")
     save_trials = st.checkbox("保存试验矩阵（供策略回测页过拟合检验使用）", value=True,
                               help="逐候选计算月频 TOP-30 组合收益，落盘 data_cache/trials/")
     if st.button("开始挖掘", use_container_width=True):
