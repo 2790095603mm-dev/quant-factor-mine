@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from qfm.data import DataLoader, build_panel, get_universe
-from qfm.factors import compute_factor, get_factor, list_factors, register_factor
+from qfm.factors import compute_factor, factor_label, get_factor, list_factors, register_factor
 from qfm.mining import run_mining
 from qfm.pipeline import factor_report, generate_report
 from qfm.pipeline.report import ic_chart, layer_chart
@@ -193,7 +193,7 @@ def page_library():
     cols = st.columns(3)
     for i, f in enumerate(fs):
         with cols[i % 3].container(border=True):
-            st.markdown(f"**{f.name}**"
+            st.markdown(f"**{factor_label(f.name)}**"
                         f"<span class='qfm-badge amber'>{f.family}</span>"
                         f"<span class='qfm-badge cyan'>{'正向' if f.direction=='positive' else '负向'}</span>",
                         unsafe_allow_html=True)
@@ -215,7 +215,8 @@ def page_test(panel):
     with tab_single:
         c1, c2, c3 = st.columns([2, 1, 1])
         factor_names = [f.name for f in list_factors()]
-        name = c1.selectbox("选择因子", factor_names, help="自定义因子注册后也会出现在这里")
+        name = c1.selectbox("选择因子", factor_names, format_func=factor_label,
+                   help="自定义因子注册后也会出现在这里")
         horizon = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2)
         run = c3.button("运行检验", use_container_width=True)
 
@@ -283,7 +284,7 @@ def page_test(panel):
 
     # ---------- Tab 2：多因子横向对比 ----------
     with tab_cmp:
-        cmp_names = st.multiselect("对比因子（可多选）", [f.name for f in list_factors()],
+        cmp_names = st.multiselect("对比因子（可多选）", [f.name for f in list_factors()], format_func=factor_label,
                                    default=["mom_20", "rev_20", "ep_ttm", "vol_20", "turnover_20"])
         cmp_h = st.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="cmp_h")
         if st.button("运行对比", use_container_width=True):
@@ -299,7 +300,7 @@ def page_test(panel):
                     stt.update(label=f"✅ {nm}", state="complete")
                 s = rep["ic_summary"]
                 rows.append({
-                    "因子": nm, "家族": f.family, "方向": "正" if f.direction == "positive" else "负",
+                    "因子": factor_label(nm), "家族": f.family, "方向": "正" if f.direction == "positive" else "负",
                     "IC": s["ic_mean"], "IC_IR": s["ic_ir"], "t值": s["ic_t"],
                     "近60日IC": rep["ic_recent"], "换手": rep["turnover"],
                 })
@@ -325,7 +326,8 @@ def page_test(panel):
         st.markdown("逐日截面 OLS 正交化：剥离行业 / 市值 / 风格暴露 → 残差因子"
                     "（方法论源自 QuantSkills factor-orthogonalize）")
         c1, c2, c3 = st.columns([2, 1, 1])
-        ortho_name = c1.selectbox("选择因子", [f.name for f in list_factors()], key="ortho_f")
+        ortho_name = c1.selectbox("选择因子", [f.name for f in list_factors()], key="ortho_f",
+                              format_func=factor_label)
         ortho_h = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="ortho_h")
         ortho_controls = c3.multiselect("剥离暴露", ["industry", "size", "style"],
                                         default=["industry", "size", "style"],
@@ -404,7 +406,7 @@ def page_mine_ml(panel):
     st.markdown("LightGBM walk-forward 滚动训练：把现有因子库**非线性合成**成一个新因子"
                 "（仅输出样本外预测，结构性无未来函数）")
     c1, c2, c3 = st.columns([2, 1, 1])
-    ml_names = c1.multiselect("特征因子", [f.name for f in list_factors()],
+    ml_names = c1.multiselect("特征因子", [f.name for f in list_factors()], format_func=factor_label,
                               default=[f.name for f in list_factors()][:10], key="ml_names")
     ml_h = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="ml_h")
     ml_folds = c3.selectbox("fold 数", [2, 4, 6], index=1, key="ml_folds",
@@ -514,7 +516,7 @@ def page_strategy(panel):
                 unsafe_allow_html=True)
     st.markdown("**① 因子合成**")
     c1, c2, c3 = st.columns([2, 1, 1])
-    names = c1.multiselect("选择因子", [f.name for f in list_factors()],
+    names = c1.multiselect("选择因子", [f.name for f in list_factors()], format_func=factor_label,
                            default=["ep_ttm", "roe", "rev_20"])
     mode = c2.selectbox("权重模式", ["equal", "ic", "icir"],
                         format_func=lambda m: {"equal": "等权", "ic": "IC 加权", "icir": "IC_IR 加权"}[m])
@@ -549,7 +551,8 @@ def page_strategy(panel):
                           state="complete")
 
         # 权重 + 相关性
-        wdf = pd.DataFrame({"因子": list(weights), "权重": list(weights.values())}).sort_values("权重", ascending=False)
+        wdf = pd.DataFrame({"因子": [factor_label(n) for n in weights], "权重": list(weights.values())})\
+    .sort_values("权重", ascending=False)
         st.markdown("**因子权重 & 相关性**")
         cw, cc = st.columns([1, 2])
         cw.dataframe(wdf.style.format({"权重": "{:.1%}"}), hide_index=True, use_container_width=True)
