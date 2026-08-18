@@ -27,12 +27,16 @@ def panel() -> DataPanel:
 
     return DataPanel(
         close=pd.DataFrame(close, index=dates, columns=cols),
+        open=pd.DataFrame(close * (1 + rng.normal(0, 0.005, (n_days, n_stocks))), index=dates, columns=cols),
+        high=pd.DataFrame(close * (1 + np.abs(rng.normal(0.005, 0.01, (n_days, n_stocks)))), index=dates, columns=cols),
+        low=pd.DataFrame(close * (1 - np.abs(rng.normal(0.005, 0.01, (n_days, n_stocks)))), index=dates, columns=cols),
         volume=pd.DataFrame(rng.integers(1e6, 5e7, (n_days, n_stocks)).astype(float), index=dates, columns=cols),
         amount=pd.DataFrame(rng.uniform(1e8, 5e9, (n_days, n_stocks)), index=dates, columns=cols),
         turnover=pd.DataFrame(rng.uniform(0.005, 0.05, (n_days, n_stocks)), index=dates, columns=cols),
         mv_float=pd.DataFrame(np.tile(mv_base, (n_days, 1)), index=dates, columns=cols),
         industry=pd.DataFrame(np.tile(np.array(stock_ind, dtype=object), (n_days, 1)), index=dates, columns=cols),
         fund={"roe": pd.DataFrame(rng.uniform(0.05, 0.25, (n_days, n_stocks)), index=dates, columns=cols),
-              "eps_ttm": pd.DataFrame(rng.uniform(0.2, 3.0, (n_days, n_stocks)), index=dates, columns=cols)},
-        fund_names=["roe", "eps_ttm"],
+              "eps_ttm": pd.DataFrame(rng.uniform(0.2, 3.0, (n_days, n_stocks)), index=dates, columns=cols),
+              "gross_margin": pd.DataFrame(rng.uniform(0.1, 0.5, (n_days, n_stocks)), index=dates, columns=cols)},
+        fund_names=["roe", "eps_ttm", "gross_margin"],
     )

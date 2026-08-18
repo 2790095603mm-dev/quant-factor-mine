@@ -72,3 +72,13 @@ def my_idea(d: DataPanel) -> pd.DataFrame:
 ## 机器学习合成因子
 
 因子检验页「ML 合成」Tab：LightGBM walk-forward 滚动训练把现有因子库非线性合成为一个新因子（仅样本外预测，结构性无未来函数）。合成后自动注册为 `ml_synth` 因子，可直接进入策略回测页参与合成与回测。
+
+## 博主「每天一个因子」系列（9 个新增因子）
+
+来源：博主公开渠道整理的 19 个因子（2026-08），公式按公开口径独立实现，实盘方向经真实缓存数据 IC 校准（5 个调整为 negative）。
+
+新增：`bb_break_20`（布林上轨突破）、`amplitude_3`（振幅，需 OHLC）、`turnover_heat`（换手升温倍数）、`rav_4`（RSI4 变化率）、`gm_yoy`（毛利率同比近似）、`sentiment_20`（情绪）、`alpha144_191`（国泰君安191）、`rev_5`（5日反转）、`vol_ratio_20`（量能比）。
+
+跳过（与现库重复/缺数据）：20日动量=mom_20、PIV=bp、PITTM=ep_ttm、20日波动=vol_20、低波动=vol_20(负向)、规模=ln_mv_float、长期动量=mom_250、Amihud=amihud_20、多空组合=分层检验"多空价差"、大单净流入=缺 Level2 数据源（二期）。
+
+实证亮点（50 只 × 20 日前瞻）：`amplitude_3` IC -0.031(t=-12.4)、`alpha144_191` IC +0.033(t=11.1)、`rev_5` IC +0.024(t=9.4)。

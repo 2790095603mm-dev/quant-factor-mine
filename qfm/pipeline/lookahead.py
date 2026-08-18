@@ -14,7 +14,8 @@ LEAK_PATTERNS: list[tuple[str, str]] = [
     (r"\.iloc\[\s*-", "负 iloc：引用序列末尾（未来）数据"),
     (r"rolling\(\s*-", "负窗口 rolling"),
     (r"pct_change\s*\([^)]*-\d", "pct_change 负周期"),
-    (r"fwd|forward_return|future|label|target", "疑似未来收益/标签变量"),
+    # \b 词边界：避免命中 from __future__ import 等合法标识
+    (r"fwd|forward_return|\bfuture\b|\blabel\b|\btarget\b", "疑似未来收益/标签变量"),
 ]
 
 # 提示级（不必然泄漏，但需人工确认）

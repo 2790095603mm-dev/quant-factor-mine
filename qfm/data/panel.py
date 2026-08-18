@@ -27,6 +27,9 @@ class DataPanel:
     fund 中的每个 DataFrame：index=交易日, columns=股票, 值=该日"已公告"的最新财务值
     """
     close: pd.DataFrame = field(default_factory=pd.DataFrame)
+    open: pd.DataFrame = field(default_factory=pd.DataFrame)
+    high: pd.DataFrame = field(default_factory=pd.DataFrame)
+    low: pd.DataFrame = field(default_factory=pd.DataFrame)
     volume: pd.DataFrame = field(default_factory=pd.DataFrame)
     amount: pd.DataFrame = field(default_factory=pd.DataFrame)
     turnover: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -50,6 +53,9 @@ def build_panel(bars: pd.DataFrame, indicators: pd.DataFrame) -> DataPanel:
 
     p = DataPanel(
         close=pivot("close"),
+        open=pivot("open"),
+        high=pivot("high"),
+        low=pivot("low"),
         volume=pivot("volume"),
         amount=pivot("amount"),
         turnover=pivot("turnover"),
