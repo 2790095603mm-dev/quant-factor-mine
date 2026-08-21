@@ -19,6 +19,8 @@ def prepare_ml_data(panel, names: list, horizon: int = 20) -> pd.DataFrame:
     """因子面板 → 长表 (date, stock, f_<因子名>…, target)
 
     特征取 T 日截面值（factor_panel 已逐日清洗），target = 未来 horizon 日收益。
+    只要求 target 非 NaN：特征缺失交给 LightGBM 原生处理（inner join 全列 dropna
+    会被单因子缺失毒化——历史教训：bb_break_20 覆盖率 0% 曾致全量训练崩溃）。
     """
     from qfm.portfolio.synthesis import factor_panel
 
@@ -26,14 +28,14 @@ def prepare_ml_data(panel, names: list, horizon: int = 20) -> pd.DataFrame:
     parts = [fdf.stack().rename(f"f_{name}") for name, fdf in factors.items()]
     X = pd.concat(parts, axis=1)
     y = forward_returns(panel.close, horizon).stack().rename("target")
-    df = X.join(y).dropna()
+    df = X.join(y).dropna(subset=["target"])
     df.index.names = ["date", "stock"]
     return df.reset_index()
 
 
 def walk_forward_train(panel, names: list, horizon: int = 20, train_cutoff=None,
                        n_folds: int = 4, lgb_params: dict | None = None,
-                       progress=None) -> tuple[pd.DataFrame, dict]:
+                       progress=None, min_coverage: float = 0.0) -> tuple[pd.DataFrame, dict]:
     """walk-forward 滚动训练：每 fold 用 ≤ cutoff 历史训练，只预测下一个样本外区间
 
     返回 (预测面板 date×stock, meta)
@@ -43,6 +45,13 @@ def walk_forward_train(panel, names: list, horizon: int = 20, train_cutoff=None,
 
     df = prepare_ml_data(panel, names, horizon)
     feat_cols = [c for c in df.columns if c.startswith("f_")]
+    # 剔除覆盖率 < min_coverage 的特征（无信息列；LightGBM 可处理部分缺失，全空列无意义）
+    keep = [c for c in feat_cols if df[c].notna().mean() >= min_coverage]
+    if len(keep) < len(feat_cols):
+        df = df.drop(columns=[c for c in feat_cols if c not in keep])
+    feat_cols = [c for c in df.columns if c.startswith("f_")]
+    if not feat_cols:
+        raise ValueError("全部特征因子缺失率过高，无可用特征")
     dates = pd.DatetimeIndex(sorted(df["date"].unique()))
     if train_cutoff is None:
         train_cutoff = dates[len(dates) * 3 // 5]
