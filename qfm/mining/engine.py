@@ -137,18 +137,25 @@ def latest_trials(trials_dir: str | None = None) -> tuple[pd.DataFrame, dict] | 
 def run_mining(panel, horizon: int = 20, max_candidates: int | None = None,
                progress=None, save_trials: bool = True, top_n: int = 30,
                trials_dir: str | None = None, feature_names=None,
-               transforms=None) -> tuple[pd.DataFrame, dict | None]:
+               transforms=None, candidates=None, n_total: int | None = None,
+               ) -> tuple[pd.DataFrame, dict | None]:
     """批量检验全部候选（v2 流式），返回 (排行榜 DataFrame, 试验矩阵元信息或 None)
 
     排行榜按 |IC| 降序，含「无未来函数」列与「变换」列；
     save_trials=True 时逐候选计算月频 TOP-N 组合收益，保存 T×N 试验矩阵。
+    candidates：可选外部候选生成器（如表达式挖掘 generate_candidates_expr），
+    提供时忽略 feature_names/transforms；n_total：候选总数提示（进度条用）。
     """
-    n_total = _candidate_total(panel, feature_names, transforms)
-    n_cap = min(max_candidates, n_total) if max_candidates else n_total
+    if candidates is not None:
+        n_total = n_total or 0
+    else:
+        n_total = _candidate_total(panel, feature_names, transforms)
+    n_cap = min(max_candidates, n_total) if (max_candidates and n_total) else (max_candidates or n_total or 10**9)
 
     rows = []
     trial_series: dict[str, pd.Series] = {}
-    for i, (name, fdf) in enumerate(generate_candidates_v2(panel, feature_names, transforms)):
+    cand_iter = candidates if candidates is not None else generate_candidates_v2(panel, feature_names, transforms)
+    for i, (name, fdf) in enumerate(cand_iter):
         if i >= n_cap:
             break
         if progress:
@@ -183,3 +190,87 @@ def run_mining(panel, horizon: int = 20, max_candidates: int | None = None,
         meta = {**meta, "path": path, "n_trials": int(matrix.shape[1]),
                 "T_periods": int(matrix.shape[0])}
     return out, meta
+
+
+# ── WQ 式排行榜附加（Fitness + 相关性去重）───────────────────────
+def fitness_score(monthly_rets: pd.Series, turnover: float) -> float:
+    """WQ Fitness ≈ Sharpe × √(|年化收益| / max(换手, 0.125))
+
+    月频收益序列 → 年化 Sharpe 与年化收益；换手下限 0.125 防"低换手刷分"。
+    """
+    rets = monthly_rets.dropna()
+    if len(rets) < 6 or rets.std() == 0 or not np.isfinite(turnover):
+        return float("nan")
+    sr = rets.mean() / rets.std() * np.sqrt(12)
+    ann = (1 + rets.mean()) ** 12 - 1
+    return sr * np.sqrt(abs(ann) / max(float(turnover), 0.125))
+
+
+def dedup_candidates(matrix: pd.DataFrame, scores: pd.Series,
+                     corr_th: float = 0.7) -> tuple[list[str], dict[str, int]]:
+    """按月频收益相关贪心去重：保留得分最高者，剔除与其相关 > corr_th 的候选。
+
+    返回 (保留候选名列表, {候选名: 组号})；组号 = 保留者所在组（被剔除者同组标注）。
+    """
+    names = [c for c in matrix.columns if c in scores.index]
+    m = matrix[names].dropna(how="all")
+    corr = m.corr().abs()
+    keep: list[str] = []
+    groups: dict[str, int] = {}
+    gid = 0
+    for name in names:
+        if name in groups:
+            continue
+        gid += 1
+        groups[name] = gid
+        keep.append(name)
+        if len(keep) > 1 or True:
+            for other in names:
+                if other in groups or other == name:
+                    continue
+                c = corr.loc[name, other] if name in corr.index and other in corr.columns else float("nan")
+                if np.isfinite(c) and c > corr_th:
+                    groups[other] = gid
+    return keep, groups
+
+
+def run_mining_expr(panel, horizon: int = 20, max_candidates: int | None = None,
+                    progress=None, save_trials: bool = True, top_n: int = 30,
+                    fields: list[str] | None = None, ops: list[str] | None = None,
+                    n_list: tuple[int, ...] = (5, 10, 20),
+                    fitness_top: int = 50, corr_th: float = 0.7,
+                    trials_dir: str | None = None) -> tuple[pd.DataFrame, dict | None]:
+    """表达式挖掘：操作符组合候选 → 复用 run_mining → 排行榜附加 Fitness / 去重组列
+
+    排行榜按 |IC| 降序；Fitness 从试验矩阵月频收益计算；去重按月频收益相关贪心。
+    返回 (排行榜 DataFrame[含 Fitness、去重组], meta)
+    """
+    from qfm.mining.expressions import build_field_map, expr_candidate_total, generate_candidates_expr
+
+    field_map = build_field_map(panel, fields)
+    fields_used = list(field_map)
+    total = expr_candidate_total(fields_used, ops, n_list)
+    cands = generate_candidates_expr(panel, ops=ops, n_list=n_list, field_map=field_map)
+
+    lb, meta = run_mining(panel, horizon=horizon, max_candidates=max_candidates,
+                          progress=progress, save_trials=save_trials, top_n=top_n,
+                          trials_dir=trials_dir, candidates=cands, n_total=total)
+
+    if not len(lb):
+        return lb, meta
+
+    # Fitness：复用试验矩阵（若保存）否则置空
+    lb["Fitness"] = float("nan")
+    lb["去重组"] = 0
+    if meta and "path" in meta:
+        matrix = pd.read_parquet(Path(meta["path"]) / "trials.parquet")
+        for idx, row in lb.iterrows():
+            if row["因子"] in matrix.columns:
+                lb.at[idx, "Fitness"] = fitness_score(matrix[row["因子"]], row["换手率"])
+        scores = lb.set_index("因子")["Fitness"]
+        keep, groups = dedup_candidates(matrix, scores, corr_th=corr_th)
+        lb["去重组"] = lb["因子"].map(groups).fillna(0).astype(int)
+        if meta:
+            meta["dedup_keep"] = keep
+            meta["dedup_groups"] = groups
+    return lb, meta

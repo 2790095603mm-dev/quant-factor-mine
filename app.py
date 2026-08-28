@@ -160,11 +160,12 @@ st.sidebar.markdown("## 量化因子挖掘流水线")
 section = st.sidebar.radio("操作台", ["因子库", "因子检验", "自动挖掘", "自定义因子", "策略回测", "数据管理"],
                            label_visibility="collapsed")
 
-# 自动挖掘子分支：批量挖掘（传统指标穷举）/ ML 合成（LightGBM walk-forward）
+# 自动挖掘子分支：批量挖掘（传统指标穷举）/ ML 合成（LightGBM walk-forward）/ 表达式挖掘（WQ 式）
 mine_mode = "批量挖掘"
 if section == "自动挖掘":
-    mine_mode = st.sidebar.radio("挖掘方式", ["批量挖掘", "ML 合成"], key="mine_mode",
-                                 help="批量挖掘=指标×窗口×变换穷举；ML 合成=LightGBM 非线性合成新因子")
+    mine_mode = st.sidebar.radio("挖掘方式", ["批量挖掘", "ML 合成", "表达式挖掘"], key="mine_mode",
+                                 help="批量挖掘=指标×窗口×变换穷举；ML 合成=LightGBM 非线性合成新因子；"
+                                      "表达式挖掘=操作符组合候选（WQ 方法论，含 Fitness/去重）")
 
 with st.sidebar.expander("数据参数", expanded=False):
     pool = st.selectbox("股票池", ["index800", "full"],
@@ -373,8 +374,11 @@ def page_mine(panel, mode: str = "批量挖掘"):
     st.markdown('<div class="qfm-sig"><h1>自动挖掘</h1>'
                 '<div class="sub">基础指标 × 窗口 × 变换 → 批量生成候选 → 批量检验 → TOP 排行榜</div></div>',
                 unsafe_allow_html=True)
-    if mode != "批量挖掘":
+    if mode == "ML 合成":
         page_mine_ml(panel)
+        return
+    if mode == "表达式挖掘":
+        page_mine_expr(panel)
         return
     c1, c2 = st.columns([1, 1])
     horizon = c1.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="mine_h")
@@ -454,6 +458,65 @@ def page_mine_ml(panel):
                         direction="positive")(lambda d: pred)
         st.caption(f"✅ 已注册为因子 `ml_synth`，可直接在「策略回测」页选择。"
                    f"预测区间 {meta['pred_start']} ~ {meta['pred_end']}——回测起点请设在此区间内或之后。")
+
+
+def page_mine_expr(panel):
+    """自动挖掘 · 表达式挖掘子分支：WQ 式操作符组合候选 → 批量检验 → Fitness/去重排行榜"""
+    from qfm.mining.fields import tech_fields
+    from qfm.mining.expressions import EXPR_OPS
+    from qfm.mining.engine import run_mining_expr
+    from qfm.factors import list_factors, ZH_NAMES
+
+    st.markdown("**WQ 式表达式挖掘**：`操作符(字段)` 组合候选（rank / ts_rank / ts_mean / ts_zscore / "
+                "ts_std / decay_linear / delta / abs）→ 批量检验 → 排行榜（**Fitness + 相关性去重**）→ "
+                "试验矩阵（供策略回测 PBO）")
+
+    fields_all = ([f.name for f in list_factors()]
+                  + ["ret", "turnover", "amount", "volume"]
+                  + list(tech_fields(panel)))
+    default_fields = ([f.name for f in list_factors()][:6]
+                      + list(tech_fields(panel))[:4])
+    c1, c2, c3 = st.columns([2, 1, 1])
+    fields_sel = c1.multiselect(
+        "字段池", fields_all, default=default_fields,
+        format_func=lambda n: ZH_NAMES.get(n, n), key="expr_fields")
+    ops_sel = c2.multiselect("操作符", EXPR_OPS,
+                             default=["rank", "ts_mean", "ts_zscore", "delta"], key="expr_ops")
+    n_sel = c3.multiselect("窗口", [5, 10, 20, 60], default=[5, 20], key="expr_n")
+    c4, c5, c6 = st.columns(3)
+    horizon = c4.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="expr_h")
+    max_c = c5.number_input("候选上限（0=全部）", 0, 5000, 300, key="expr_max")
+    top_n = c6.selectbox("TOP-N 组合（试验矩阵）", [10, 20, 30, 50], index=2, key="expr_topn")
+
+    if st.button("挖掘表达式候选", use_container_width=True):
+        if not fields_sel or not ops_sel:
+            st.error("至少选择一个字段和一个操作符")
+            return
+        prog = st.progress(0.0, text="准备字段池…")
+        t0 = pd.Timestamp.now()
+        try:
+            lb, meta = run_mining_expr(
+                panel, horizon=horizon, max_candidates=int(max_c) or None,
+                save_trials=True, top_n=int(top_n),
+                fields=fields_sel, ops=ops_sel, n_list=tuple(int(x) for x in n_sel),
+                progress=lambda i, n, msg: prog.progress(
+                    min((i + 1) / max(n, 1), 1.0), text=f"{i + 1}/{n} {msg}"))
+        except Exception as e:  # noqa: BLE001
+            st.error(f"挖掘失败：{e}")
+            return
+        cost = (pd.Timestamp.now() - t0).total_seconds()
+        k1, k2, k3 = st.columns(3)
+        k1.metric("候选数", len(lb))
+        k2.metric("耗时", f"{cost:.0f}s")
+        k3.metric("试验矩阵", meta["n_trials"] if meta else "—")
+        st.dataframe(lb, use_container_width=True, hide_index=True)
+        st.caption("列说明：`Fitness`=WQ 综合分（Sharpe×√(收益/换手)）；`去重组`=按月频收益相关贪心去重"
+                   "（同组号只保留 Fitness 最高者）。试验矩阵保存后可在「策略回测」页加载做 PBO。")
+        st.download_button("⬇ 下载排行榜 CSV", lb.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="expr_leaderboard.csv", mime="text/csv")
+        if meta and meta.get("path"):
+            st.caption(f"📁 试验矩阵：`{meta['path']}`"
+                       f"（{meta['n_trials']} 候选 × {meta['T_periods']} 期月频收益）")
 
 
 # ---------------------------------------------------------------------------
