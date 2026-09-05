@@ -25,7 +25,7 @@ def test_strategy_payload_records_execution_assumptions(panel):
         cost_pct=0.001,
         cost_total=0.02,
         cash_weight=cash,
-        params={"execution": "next_open"},
+        params={"execution": "next_open", "constraints": {"max_stock_weight": 0.08}},
     )
 
     payload = build_strategy_run_payload(
@@ -55,6 +55,7 @@ def test_strategy_payload_records_execution_assumptions(panel):
     assert payload["data_snapshot"]["fingerprints"]["market"].startswith("sha256:")
     assert payload["data_snapshot"]["coverage"]["fundamentals"]["roe"] == 1.0
     assert payload["config"]["execution"] == "next_open"
+    assert payload["config"]["portfolio_constraints"]["max_stock_weight"] == 0.08
     assert payload["config"]["orthogonalize"] is False
     assert payload["summary"]["成交笔数"] == len(trades)
     assert payload["weights"].index.name == "factor"
