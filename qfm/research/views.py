@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -10,6 +11,15 @@ import streamlit as st
 
 from qfm.research.store import ResearchStore
 from qfm.research.ui_state import can_save_strategy_run, set_active_project
+
+
+def _format_metric(value: Any, template: str) -> str:
+    """将缺失或非有限的归档指标显示为占位符，而不是令页面格式化失败。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return template.format(number) if math.isfinite(number) else "—"
 
 
 def _project_label(project_id: str, projects: dict[str, Any]) -> str:
@@ -87,6 +97,7 @@ def render_strategy_save_panel(store: ResearchStore) -> None:
                 payload["weights"],
                 payload["yearly_performance"],
                 payload["trades"],
+                payload.get("constraint_history"),
             )
         except (OSError, ValueError, KeyError) as exc:
             st.error(f"保存失败：{exc}")
@@ -200,7 +211,13 @@ def page_research(store: ResearchStore) -> None:
     st.markdown("**研究运行**")
     st.dataframe(
         table.style.format(
-            {"年化收益": "{:+.1%}", "夏普": "{:.2f}", "最大回撤": "{:.1%}", "年化换手": "{:.1f}", "累计成本": "{:.2%}"}
+            {
+                "年化收益": lambda value: _format_metric(value, "{:+.1%}"),
+                "夏普": lambda value: _format_metric(value, "{:.2f}"),
+                "最大回撤": lambda value: _format_metric(value, "{:.1%}"),
+                "年化换手": lambda value: _format_metric(value, "{:.1f}"),
+                "累计成本": lambda value: _format_metric(value, "{:.2%}"),
+            }
         ),
         hide_index=True,
         use_container_width=True,
@@ -268,8 +285,11 @@ def page_research(store: ResearchStore) -> None:
     col_yearly.dataframe(loaded.yearly_performance, hide_index=True, use_container_width=True)
     with st.expander(f"成交流水（{len(loaded.trades)} 笔）"):
         st.dataframe(loaded.trades, hide_index=True, use_container_width=True)
+    if loaded.constraint_history is not None:
+        with st.expander(f"组合约束执行审计（{len(loaded.constraint_history)} 次）"):
+            st.dataframe(loaded.constraint_history, hide_index=True, use_container_width=True)
     st.markdown("**导出保存的研究产物**")
-    export_columns = st.columns(5)
+    export_columns = st.columns(6 if loaded.constraint_history is not None else 5)
     export_columns[0].download_button(
         "净值 CSV", loaded.nav.to_csv().encode("utf-8-sig"), "research_nav.csv", "text/csv", use_container_width=True
     )
@@ -285,3 +305,11 @@ def page_research(store: ResearchStore) -> None:
     export_columns[4].download_button(
         "成交 CSV", loaded.trades.to_csv(index=False).encode("utf-8-sig"), "research_trades.csv", "text/csv", use_container_width=True
     )
+    if loaded.constraint_history is not None:
+        export_columns[5].download_button(
+            "约束审计 CSV",
+            loaded.constraint_history.to_csv(index=False).encode("utf-8-sig"),
+            "research_constraint_history.csv",
+            "text/csv",
+            use_container_width=True,
+        )

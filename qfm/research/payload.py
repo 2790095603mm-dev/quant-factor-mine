@@ -82,6 +82,11 @@ def build_strategy_run_payload(
     data_snapshot = build_data_snapshot(panel, pool)
     factor_weights = pd.DataFrame.from_dict(weights, orient="index", columns=["weight"])
     factor_weights.index.name = "factor"
+    constraint_history = (
+        backtest.constraint_history.copy()
+        if backtest.constraint_history is not None and not backtest.constraint_history.empty
+        else None
+    )
     return {
         "config": _json_safe(config),
         "data_snapshot": _json_safe(data_snapshot),
@@ -91,4 +96,5 @@ def build_strategy_run_payload(
         "weights": factor_weights,
         "yearly_performance": yearly_perf(backtest.nav),
         "trades": backtest.trades.copy(),
+        "constraint_history": constraint_history,
     }

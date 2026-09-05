@@ -169,3 +169,4 @@ class LoadedResearchRun:
     weights: pd.DataFrame
     yearly_performance: pd.DataFrame
     trades: pd.DataFrame
+    constraint_history: pd.DataFrame | None = None

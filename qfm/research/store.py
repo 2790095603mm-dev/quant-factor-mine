@@ -87,6 +87,7 @@ class ResearchStore:
         weights: pd.DataFrame,
         yearly_performance: pd.DataFrame,
         trades: pd.DataFrame,
+        constraint_history: pd.DataFrame | None = None,
     ) -> ResearchRun:
         self.get_project(project_id)
         artifacts = {
@@ -96,6 +97,8 @@ class ResearchStore:
             "yearly_performance": "yearly_performance.csv",
             "trades": "trades.csv",
         }
+        if constraint_history is not None and not constraint_history.empty:
+            artifacts["constraint_history"] = "constraint_history.csv"
         run = ResearchRun.create(project_id, name, config, data_snapshot, summary, artifacts)
         target = self.runs_dir / run.id
         temporary = self.runs_dir / f".{run.id}.{uuid4().hex}.tmp"
@@ -113,6 +116,8 @@ class ResearchStore:
             self._write_csv(weights, temporary / artifacts["weights"], index_label="factor")
             self._write_csv(yearly_performance, temporary / artifacts["yearly_performance"])
             self._write_csv(trades, temporary / artifacts["trades"])
+            if "constraint_history" in artifacts and constraint_history is not None:
+                self._write_csv(constraint_history, temporary / artifacts["constraint_history"])
             self._write_json(temporary / "manifest.json", run.to_dict())
             temporary.replace(target)
         except Exception:
@@ -160,6 +165,14 @@ class ResearchStore:
             frame["signal_date"] = pd.to_datetime(frame["signal_date"])
         return frame
 
+    @staticmethod
+    def _read_constraint_history(path: Path) -> pd.DataFrame:
+        frame = pd.read_csv(path)
+        for column in ("signal_date", "execution_date"):
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column])
+        return frame
+
     def load_run(self, run_id: str) -> LoadedResearchRun:
         directory = self.runs_dir / run_id
         if not directory.is_dir():
@@ -169,6 +182,11 @@ class ResearchStore:
         try:
             weights = pd.read_csv(artifact("weights"), index_col="factor")
             yearly = pd.read_csv(artifact("yearly_performance"))
+            constraint_history = (
+                self._read_constraint_history(artifact("constraint_history"))
+                if "constraint_history" in run.artifacts
+                else None
+            )
             return LoadedResearchRun(
                 run=run,
                 nav=self._read_series(artifact("nav"), "nav"),
@@ -176,6 +194,7 @@ class ResearchStore:
                 weights=weights,
                 yearly_performance=yearly,
                 trades=self._read_trades(artifact("trades")),
+                constraint_history=constraint_history,
             )
         except (KeyError, OSError, ValueError, pd.errors.ParserError) as exc:
             raise ValueError(f"研究运行产物损坏: {run_id}") from exc
