@@ -77,6 +77,7 @@ def build_strategy_run_payload(
         "max_participation": max_participation,
         "initial_capital": initial_capital,
         "execution": backtest.params.get("execution", "next_open"),
+        "portfolio_constraints": dict(backtest.params.get("constraints", {})),
     }
     data_snapshot = build_data_snapshot(panel, pool)
     factor_weights = pd.DataFrame.from_dict(weights, orient="index", columns=["weight"])
