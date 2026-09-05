@@ -16,6 +16,15 @@ def test_strategy_payload_records_execution_assumptions(panel):
     holdings = pd.DataFrame(0.0, index=index, columns=columns)
     cash = pd.Series([1.0, 0.0, 0.0], index=index)
     trades = pd.DataFrame({"date": [index[1]], "stock": [columns[0]], "side": ["BUY"]})
+    constraint_history = pd.DataFrame(
+        {
+            "signal_date": [index[0]],
+            "execution_date": [index[1]],
+            "target_cash": [0.0],
+            "actual_cash": [0.25],
+            "target_tracking_error": [0.25],
+        }
+    )
     result = BacktestResult(
         nav=nav,
         bench_nav=benchmark,
@@ -25,6 +34,7 @@ def test_strategy_payload_records_execution_assumptions(panel):
         cost_pct=0.001,
         cost_total=0.02,
         cash_weight=cash,
+        constraint_history=constraint_history,
         params={"execution": "next_open", "constraints": {"max_stock_weight": 0.08}},
     )
 
@@ -60,3 +70,5 @@ def test_strategy_payload_records_execution_assumptions(panel):
     assert payload["summary"]["成交笔数"] == len(trades)
     assert payload["weights"].index.name == "factor"
     assert payload["nav"].equals(nav.rename("nav"))
+    assert payload["constraint_history"].equals(constraint_history)
+    assert payload["constraint_history"] is not constraint_history

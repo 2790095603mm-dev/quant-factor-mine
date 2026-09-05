@@ -46,6 +46,43 @@ def test_store_round_trips_project_and_run(tmp_path, artifacts):
     pd.testing.assert_frame_equal(loaded.weights, weights)
     pd.testing.assert_frame_equal(loaded.yearly_performance, yearly)
     pd.testing.assert_frame_equal(loaded.trades, trades)
+    assert loaded.constraint_history is None
+    assert "constraint_history" not in run.artifacts
+
+
+def test_store_round_trips_optional_constraint_history(tmp_path, artifacts):
+    nav, benchmark_nav, weights, yearly, trades = artifacts
+    constraint_history = pd.DataFrame(
+        {
+            "signal_date": [pd.Timestamp("2026-01-01")],
+            "execution_date": [pd.Timestamp("2026-01-02")],
+            "target_cash": [0.0],
+            "actual_cash": [0.25],
+            "target_tracking_error": [0.25],
+            "stock_cap_exceeded": [False],
+            "industry_cap_exceeded": [False],
+        }
+    )
+    store = ResearchStore(tmp_path / "research")
+    project = store.create_project("约束审计")
+
+    run = store.save_run(
+        project.id,
+        "带约束",
+        {},
+        {},
+        {},
+        nav,
+        benchmark_nav,
+        weights,
+        yearly,
+        trades,
+        constraint_history,
+    )
+    loaded = store.load_run(run.id)
+
+    assert run.artifacts["constraint_history"] == "constraint_history.csv"
+    pd.testing.assert_frame_equal(loaded.constraint_history, constraint_history)
 
 
 def test_store_lists_newest_run_first(tmp_path, artifacts):

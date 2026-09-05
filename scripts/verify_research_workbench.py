@@ -24,6 +24,14 @@ def main() -> None:
         weights = pd.DataFrame({"weight": [1.0]}, index=pd.Index(["ep_ttm"], name="factor"))
         yearly = pd.DataFrame({"年份": [2026], "收益": [0.01]})
         trades = pd.DataFrame({"date": [dates[1]], "stock": ["600000"], "side": ["BUY"]})
+        constraint_history = pd.DataFrame(
+            {
+                "signal_date": [dates[0]],
+                "execution_date": [dates[1]],
+                "target_cash": [0.0],
+                "actual_cash": [0.25],
+            }
+        )
         data_snapshot = {
             "snapshot_version": 2,
             "pool": "index800",
@@ -44,11 +52,13 @@ def main() -> None:
             weights,
             yearly,
             trades,
+            constraint_history,
         )
         loaded = store.load_run(run.id)
         assert loaded.run.id == run.id
         assert loaded.run.data_snapshot["snapshot_version"] == 2
         assert loaded.trades.loc[0, "stock"] == "600000"
+        assert loaded.constraint_history.loc[0, "actual_cash"] == 0.25
     print("research workbench smoke: ok")
 
 
