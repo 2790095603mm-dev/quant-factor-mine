@@ -3,8 +3,10 @@
 启动: streamlit run app.py
 """
 
+import ast
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -12,14 +14,47 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from qfm.data import DataLoader, build_panel, get_universe
-from qfm.factors import compute_factor, factor_label, get_factor, list_factors, register_factor
+from qfm.data import DataCatalog, DataLoader, build_panel, get_universe, register_panel_dataset
+from qfm.data.catalog_views import render_data_catalog
+from qfm.factors import (
+    all_tags,
+    compute_factor,
+    factor_label,
+    get_factor,
+    list_families,
+    list_factor_versions,
+    list_factors,
+    register_factor,
+    save_registry,
+)
 from qfm.mining import run_mining
+from qfm.jobs import JobService
+from qfm.jobs.views import render_job_center
+from qfm.multifactor import CompositeRegistry
+from qfm.multifactor.views import render_multifactor_lab
 from qfm.pipeline import factor_report, generate_report
 from qfm.pipeline.report import ic_chart, layer_chart
+from qfm.research import ResearchStore, build_strategy_run_payload
+from qfm.research.snapshot import build_data_snapshot
+from qfm.research.views import active_project_name, page_research, render_strategy_save_panel
+from qfm.analysis.factor_views import render_factor_compare
+from qfm.analysis.strategy_views import render_strategy_compare
 
 st.set_page_config(page_title="量化因子挖掘流水线", page_icon="📈",
                    layout="wide", initial_sidebar_state="expanded")
+
+RESEARCH_STORE = ResearchStore(
+    Path(os.environ.get("QFM_RESEARCH_ROOT", Path(__file__).resolve().parent / "data_cache" / "research"))
+)
+CATALOG = DataCatalog(
+    Path(os.environ.get("QFM_CATALOG_ROOT", Path(__file__).resolve().parent / "data_cache" / "catalog"))
+)
+JOB_SERVICE = JobService(
+    Path(os.environ.get("QFM_JOB_ROOT", Path(__file__).resolve().parent / "data_cache" / "jobs"))
+)
+COMPOSITE_REGISTRY = CompositeRegistry(
+    Path(os.environ.get("QFM_COMPOSITE_REGISTRY", Path(__file__).resolve().parent / "data_cache" / "factors"))
+)
 
 # ---------------------------------------------------------------------------
 # 深色金融终端风：琥珀金签名线 + 发丝边框 + 等宽数字
@@ -157,8 +192,12 @@ def verdict_of(rep: dict) -> tuple[str, str]:
 # 侧边栏
 # ---------------------------------------------------------------------------
 st.sidebar.markdown("## 量化因子挖掘流水线")
-section = st.sidebar.radio("操作台", ["因子库", "因子检验", "自动挖掘", "自定义因子", "策略回测", "数据管理"],
-                           label_visibility="collapsed")
+section = st.sidebar.radio("操作台", [
+    "研究项目", "因子库", "因子检验", "因子对比", "多因子实验室",
+    "自动挖掘", "自定义因子", "策略回测", "策略对比",
+    "数据与股票池", "任务中心", "数据管理",
+],
+                           label_visibility="collapsed", key="section")
 
 # 自动挖掘子分支：批量挖掘（传统指标穷举）/ ML 合成（LightGBM walk-forward）/ 表达式挖掘（WQ 式）
 mine_mode = "批量挖掘"
@@ -168,37 +207,91 @@ if section == "自动挖掘":
                                       "表达式挖掘=操作符组合候选（WQ 方法论，含 Fitness/去重）")
 
 with st.sidebar.expander("数据参数", expanded=False):
-    pool = st.selectbox("股票池", ["index800", "full"],
-                        help="index800=沪深300+中证500（快）；full=全市场（很慢）")
-    max_stocks = st.number_input("限制股票数（0=全部）", 0, 6000, 0)
+    custom_pools = sorted({
+        item.universe_id for item in CATALOG.list_universes()
+        if item.universe_id.startswith("custom_")
+    })
+    # 保持旧版默认值 index800，不改变既有页面首次打开时的数据规模与运行口径。
+    pool_options = ["index800", "cn_hs300", "cn_zz500", "cn_zz1000", "cn_all_a", "full", *custom_pools]
+    pool_labels = {
+        "cn_hs300": "沪深300", "cn_zz500": "中证500", "cn_zz1000": "中证1000",
+        "cn_all_a": "全A", "index800": "沪深300 + 中证500（兼容）", "full": "全A（兼容）",
+    }
+    pool = st.selectbox(
+        "股票池", pool_options, key="pool",
+        format_func=lambda value: pool_labels.get(value, next(
+            (item.name for item in CATALOG.list_universes() if item.universe_id == value), value
+        )),
+        help="标准股票池与自定义股票池都带 Universe ID；实验保存时会记录具体版本。",
+    )
+    max_stocks = st.number_input("限制股票数（0=全部）", 0, 6000, 0, key="max_stocks")
     st.caption("首次拉取约 5-15 分钟，之后全部走本地缓存")
 
 dl = DataLoader()
-st.sidebar.caption(f"缓存状态：日线 {dl.status()['stocks_cached']} 只 · "
-                   f"财务 {'✅' if dl.status()['indicators_cached'] else '❌'}")
+cache_status = dl.status()
+st.sidebar.caption(f"缓存状态：日线 {cache_status['stocks_cached']} 只 · "
+                   f"财务 {'✅' if cache_status['indicators_cached'] else '❌'}")
+active_research_project = active_project_name(RESEARCH_STORE)
+if active_research_project:
+    st.sidebar.caption(f"当前研究项目：{active_research_project}")
 
 # ---------------------------------------------------------------------------
 # ① 因子库
 # ---------------------------------------------------------------------------
+def _open_factor_test(name):
+    st.session_state["test_factor"] = name
+    st.session_state["section"] = "因子检验"
+
+
 def page_library():
+    factors_all = list_factors()
+    family_count = len({f.family for f in factors_all})
+    versioned = sum(1 for f in factors_all if f.version > 1)
+    all_tags_local = all_tags()
     st.markdown('<div class="qfm-sig"><h1>因子库</h1>'
-                '<div class="sub">31 个内置因子 · 7 大家族 · 点左侧「因子检验」逐个验证</div></div>',
+                f'<div class="sub">{len(factors_all)} 个内置因子 · {family_count} 大家族 · '
+                f'{len(all_tags_local)} 个标签 · 每个因子带版本、公式与定义指纹</div></div>',
                 unsafe_allow_html=True)
-    c1, c2 = st.columns([1, 2])
-    family = c1.selectbox("家族筛选", ["全部"] + [f for f in ["价值", "质量", "成长", "动量反转", "波动", "流动性", "规模", "实战"]])
-    keyword = c2.text_input("关键词搜索", placeholder="如：动量 / roe / 换手")
+    c1, c2, c3 = st.columns([1, 2, 1])
+    family = c1.selectbox("家族筛选", ["全部"] + list_families())
+    keyword = c2.text_input("关键词搜索", placeholder="如：动量 / roe / 换手 / 估值")
+    tag = c3.selectbox("标签筛选", ["全部"] + all_tags_local)
     fs = list_factors(family if family != "全部" else None)
+    if tag != "全部":
+        fs = [f for f in fs if tag in f.tags]
     if keyword:
-        fs = [f for f in fs if keyword.lower() in f.name.lower() or keyword in f.description]
-    st.caption(f"共 {len(fs)} 个因子")
+        needle = keyword.lower()
+        fs = [f for f in fs
+              if needle in f.name.lower() or keyword in f.description or needle in (f.formula or "").lower()]
+    st.caption(f"共 {len(fs)} 个因子" + (f" · 其中 {versioned} 个因子已有多个版本" if versioned else ""))
     cols = st.columns(3)
     for i, f in enumerate(fs):
         with cols[i % 3].container(border=True):
+            badges = "".join(f"<span class='qfm-badge cyan'>{t}</span>" for t in f.tags)
             st.markdown(f"**{factor_label(f.name)}**"
                         f"<span class='qfm-badge amber'>{f.family}</span>"
-                        f"<span class='qfm-badge cyan'>{'正向' if f.direction=='positive' else '负向'}</span>",
+                        f"<span class='qfm-badge cyan'>{'正向' if f.direction=='positive' else '负向'}</span>"
+                        f"<span class='qfm-badge amber'>v{f.version}</span>{badges}",
                         unsafe_allow_html=True)
             st.markdown(f"<div class='qfm-desc'>{f.description}</div>", unsafe_allow_html=True)
+            with st.expander("公式 / 参数 / 定义指纹"):
+                st.code(f.formula or "（未记录源码）", language="python")
+                if f.params:
+                    st.caption("注册参数：" + "，".join(f"{k}={v!r}" for k, v in sorted(f.params.items())))
+                st.caption(f"定义指纹 {f.source_hash} · 注册于 {f.created_at[:19]}")
+                versions = list_factor_versions(f.name)
+                if len(versions) > 1:
+                    st.markdown("**版本历史**")
+                    st.dataframe(
+                        pd.DataFrame([
+                            {"版本": v.version, "说明": v.description, "方向": v.direction,
+                             "定义指纹": v.source_hash[:20], "注册时间": v.created_at[:19]}
+                            for v in versions
+                        ]),
+                        hide_index=True, use_container_width=True,
+                    )
+            st.button("检验此因子", key=f"test_from_library_{f.name}", use_container_width=True,
+                      on_click=_open_factor_test, args=(f.name,))
 
 
 # ---------------------------------------------------------------------------
@@ -206,82 +299,16 @@ def page_library():
 # ---------------------------------------------------------------------------
 def page_test(panel):
     st.markdown('<div class="qfm-sig"><h1>因子检验</h1>'
-                '<div class="sub">清洗 → IC / IC_IR / 分层 / 换手 / 衰减监控 → 一键导出 HTML 报告</div></div>',
+                '<div class="sub">一次运行 · 因子预测能力 + 组合模拟 · Sharpe / 回撤 / Fitness</div></div>',
                 unsafe_allow_html=True)
     import plotly.graph_objects as go
 
-    tab_single, tab_cmp, tab_ortho = st.tabs(["单因子检验", "多因子对比", "正交化"])
+    tab_single, tab_cmp, tab_ortho = st.tabs(["单因子检验与模拟", "多因子对比", "正交化"])
 
-    # ---------- Tab 1：单因子检验 ----------
+    # ---------- Tab 1：统一单因子检验与模拟 ----------
     with tab_single:
-        c1, c2, c3 = st.columns([2, 1, 1])
-        factor_names = [f.name for f in list_factors()]
-        name = c1.selectbox("选择因子", factor_names, format_func=factor_label,
-                   help="自定义因子注册后也会出现在这里")
-        horizon = c2.selectbox("前瞻天数", [5, 10, 20, 60], index=2)
-        run = c3.button("运行检验", use_container_width=True)
-
-        f = get_factor(name)
-        if run:
-            with st.status("检验中…", expanded=False) as status:
-                rep = factor_report(compute_factor(name, panel), panel.close,
-                                    horizon=horizon, direction=f.direction)
-                status.update(label=f"✅ 完成：{name} · 前瞻 {horizon} 日", state="complete")
-            s = rep["ic_summary"]
-            mono = rep["monotonicity"]
-            verdict, vcolor = verdict_of(rep)
-
-            st.markdown(f"<span style='color:{vcolor};font-weight:600;font-size:15px'>{verdict}</span>"
-                        f"<span class='qfm-badge'>{f.family}</span>"
-                        f"<span class='qfm-badge'>{'正向' if f.direction=='positive' else '负向'}</span>"
-                        f"<div class='qfm-desc'>{f.description}</div>", unsafe_allow_html=True)
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
-            k1.metric("平均 IC", f"{s['ic_mean']:+.4f}" if pd.notna(s["ic_mean"]) else "—")
-            k2.metric("IC_IR", f"{s['ic_ir']:.2f}" if pd.notna(s["ic_ir"]) else "—")
-            k3.metric("t 值", f"{s['ic_t']:.2f}" if pd.notna(s["ic_t"]) else "—")
-            k4.metric("IC 正占比", f"{s['pos_ratio']:.0%}" if pd.notna(s["pos_ratio"]) else "—")
-            k5.metric("组合换手", f"{rep['turnover']:.0%}" if pd.notna(rep["turnover"]) else "—")
-            k6.metric("多空价差", f"{mono['spread']:+.4f}" if pd.notna(mono["spread"]) else "—")
-
-            st.plotly_chart(ic_chart(rep), use_container_width=True)
-            st.plotly_chart(layer_chart(rep, f.direction), use_container_width=True)
-
-            with st.expander("分年 IC"):
-                y = rep["ic_by_year"]
-                st.dataframe(pd.DataFrame({"年份": y.index, "平均 IC": y.values.round(4)}), hide_index=True)
-
-            with st.expander("IC 衰减监控"):
-                fig3 = go.Figure()
-                fig3.add_trace(go.Scatter(x=rep["ic_rolling"].index, y=rep["ic_rolling"].values,
-                                          name="IC 120日均线", line=dict(color="#7C4DFF", width=2)))
-                fig3.add_hline(y=0, line=dict(color="#C9B8F0", width=1, dash="dash"))
-                fig3.update_layout(height=260, margin=dict(t=30), paper_bgcolor="rgba(0,0,0,0)",
-                                   plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#3B2E5E"))
-                st.plotly_chart(fig3, use_container_width=True)
-                d = rep["ic_decay"]
-                dc1, dc2 = st.columns(2)
-                dc1.metric("全期 IC", f"{s['ic_mean']:+.4f}")
-                dc2.metric("近 60 日 IC", f"{rep['ic_recent']:+.4f}" if pd.notna(rep["ic_recent"]) else "—")
-                if pd.notna(d):
-                    if d > 0.01:
-                        state_txt, state_col = "📈 增强（近端强于全期）", "#2E9E6B"
-                    elif d < -0.01:
-                        state_txt, state_col = "📉 衰减（近端弱于全期，警惕失效）", "#E5484D"
-                    else:
-                        state_txt, state_col = "➡️ 稳定", "#C9B8F0"
-                    st.markdown(f"<span style='color:{state_col};font-weight:600'>{state_txt}</span>"
-                                f"<span class='qfm-desc'>　滚动 120 日均线持续下滑且近 60 日 IC 明显低于全期 → 因子正在失效，"
-                                f"建议正交化、换窗口或移出因子池</span>", unsafe_allow_html=True)
-
-            html = generate_report(rep, name, f.family, f.description, f.direction,
-                                   os.path.join("reports", f"{name}_h{horizon}.html"))
-            with open(html, encoding="utf-8") as fh:
-                st.download_button("⬇ 下载 HTML 报告", fh.read(), file_name=os.path.basename(html),
-                                   mime="text/html", use_container_width=True)
-        else:
-            st.info("选择因子和前瞻天数后，点「运行检验」。")
-            if panel is not None:
-                st.caption(f"当前面板：{panel.close.shape[0]} 个交易日 × {panel.close.shape[1]} 只股票")
+        from qfm.simulation.views import render_single_factor
+        render_single_factor(panel, pool, RESEARCH_STORE, JOB_SERVICE, CATALOG.root)
 
     # ---------- Tab 2：多因子横向对比 ----------
     with tab_cmp:
@@ -320,7 +347,7 @@ def page_test(panel):
                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                               font=dict(color="#3B2E5E"))
             st.plotly_chart(fig, use_container_width=True)
-            st.caption("紫色=正向 IC，粉色=负向 IC。负向 IC 的因子（如 A 股反转）取反后即为有效信号。")
+            st.caption("所有结果均已按因子方向规范为“高分更好”：紫色为正向有效 IC，粉色提示方向或稳定性需复核。")
 
     # ---------- Tab 3：正交化（QuantSkills factor-orthogonalize 方法论） ----------
     with tab_ortho:
@@ -380,22 +407,26 @@ def page_mine(panel, mode: str = "批量挖掘"):
     if mode == "表达式挖掘":
         page_mine_expr(panel)
         return
-    c1, c2 = st.columns([1, 1])
+    c1, c2, c3 = st.columns([1, 1, 1])
     horizon = c1.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="mine_h")
     max_c = c2.selectbox("候选数限制", [60, 120, 244, 500], index=2,
                          help="v2 全量 244 = 49 个因子 × 4 种变换 + 基础窗口集；每候选约 2 秒（流式计算，内存占用低）")
+    trial_top_n = c3.selectbox("试验组合持仓数", [10, 20, 30, 50], index=2,
+                               help="试验矩阵只可用于持仓数与调仓频率一致的策略 PBO / DSR 检验")
     save_trials = st.checkbox("保存试验矩阵（供策略回测页过拟合检验使用）", value=True,
                               help="逐候选计算月频 TOP-30 组合收益，落盘 data_cache/trials/")
     if st.button("开始挖掘", use_container_width=True):
         prog = st.progress(0.0, text="准备…")
         df, trials_meta = run_mining(panel, horizon=horizon, max_candidates=max_c,
-                                     save_trials=save_trials,
+                                     save_trials=save_trials, top_n=trial_top_n,
+                                     trial_context={"pool": st.session_state.get("pool", "index800")},
                                      progress=lambda i, n, nm: prog.progress((i + 1) / n, text=f"{i+1}/{n} · {nm}"))
         st.success(f"挖掘完成：{len(df)} 个候选因子")
         st.dataframe(df.style.format({"IC": "{:+.4f}", "IC_IR": "{:.2f}", "t值": "{:.2f}",
                                       "正占比": "{:.0%}", "换手率": "{:.0%}"}),
                      use_container_width=True, height=420)
         if trials_meta:
+            st.session_state["trial_experiment"] = trials_meta
             st.caption(f"📁 试验矩阵已保存：`{trials_meta['path']}`"
                        f"（{trials_meta['n_trials']} 候选 × {trials_meta['T_periods']} 期月频收益 · "
                        f"TOP{trials_meta['top_n']} 等权）")
@@ -453,9 +484,15 @@ def page_mine_ml(panel):
 
         from qfm.factors import register_factor
 
+        # lambda 的源码会随 app.py 变动，故用训练参数摘要作为稳定定义指纹，
+        # 否则同一份 ML 因子每次都会"升级版本"，实验归档无法核对。
+        ml_source_key = (f"lightgbm:horizon={ml_h};folds={ml_folds};cutoff={ml_cutoff};"
+                         f"features={'|'.join(sorted(ml_names))}")
         register_factor(name="ml_synth", family="机器学习",
                         description=f"LightGBM walk-forward 合成（{ml_h}日前瞻，训练截止 {ml_cutoff}）",
-                        direction="positive")(lambda d: pred)
+                        direction="positive", source_key=ml_source_key,
+                        params={"horizon": ml_h, "folds": ml_folds, "cutoff": ml_cutoff})(
+                            lambda d: pred)
         st.caption(f"✅ 已注册为因子 `ml_synth`，可直接在「策略回测」页选择。"
                    f"预测区间 {meta['pred_start']} ~ {meta['pred_end']}——回测起点请设在此区间内或之后。")
 
@@ -510,7 +547,7 @@ def page_mine_expr(panel):
         k2.metric("耗时", f"{cost:.0f}s")
         k3.metric("试验矩阵", meta["n_trials"] if meta else "—")
         st.dataframe(lb, use_container_width=True, hide_index=True)
-        st.caption("列说明：`Fitness`=WQ 综合分（Sharpe×√(收益/换手)）；`去重组`=按月频收益相关贪心去重"
+        st.caption("列说明：此处 `Fitness` 是旧版月频收益/名单换手近似分数，与「因子检验」的日频成交口径不同；`去重组`=按月频收益相关贪心去重"
                    "（同组号只保留 Fitness 最高者）。试验矩阵保存后可在「策略回测」页加载做 PBO。")
         st.download_button("⬇ 下载排行榜 CSV", lb.to_csv(index=False).encode("utf-8-sig"),
                            file_name="expr_leaderboard.csv", mime="text/csv")
@@ -531,18 +568,50 @@ def my_factor(d):
 '''
 
 
+def validate_custom_factor_source(code: str) -> list[str]:
+    """阻止明显的进程/文件/动态执行入口；这不是隔离容器的替代品。"""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return [f"语法错误：{exc.msg}（第 {exc.lineno} 行）"]
+    blocked_nodes = (ast.Import, ast.ImportFrom, ast.With, ast.AsyncWith, ast.ClassDef,
+                     ast.Global, ast.Nonlocal, ast.Delete, ast.Try, ast.Raise)
+    blocked_calls = {"open", "exec", "eval", "compile", "globals", "locals", "vars",
+                     "getattr", "setattr", "delattr", "input", "breakpoint", "__import__"}
+    errors = []
+    for node in ast.walk(tree):
+        if isinstance(node, blocked_nodes):
+            errors.append(f"不允许 {type(node).__name__}")
+        if isinstance(node, ast.Name) and node.id.startswith("__"):
+            errors.append("不允许双下划线名称")
+        if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            errors.append("不允许访问私有属性")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
+            errors.append(f"不允许调用 {node.func.id}")
+    return list(dict.fromkeys(errors))
+
+
 def page_custom(panel):
     st.markdown('<div class="qfm-sig"><h1>自定义因子</h1>'
                 '<div class="sub">把你的主观交易经验写成因子，立即进入统一检验流程</div></div>',
                 unsafe_allow_html=True)
     st.code("从 qfm.factors 导入后，装饰器会自动注册；模板如下（可直接改）：", language=None)
+    st.warning("自定义代码会在本机研究进程中运行。仅粘贴你信任的公式；服务默认只监听本机，不应暴露到局域网。")
     code = st.text_area("因子代码", CUSTOM_TEMPLATE, height=260)
     c1, c2, c3 = st.columns([1, 1, 2])
     if c1.button("注册并检验", use_container_width=True):
         try:
-            ns = {"pd": pd, "np": np, "register_factor": register_factor}
+            source_errors = validate_custom_factor_source(code)
+            if source_errors:
+                st.error("代码未执行：" + "；".join(source_errors))
+                return
+            safe_builtins = {"abs": abs, "min": min, "max": max, "sum": sum,
+                             "len": len, "range": range, "float": float, "int": int}
+            ns = {"__builtins__": safe_builtins, "pd": pd, "np": np,
+                  "register_factor": register_factor}
             from qfm.data.panel import DataPanel
             ns["DataPanel"] = DataPanel
+            before = set(f.name for f in list_factors())
             exec(code, ns)
             from qfm.pipeline.lookahead import scan_source
             chk = scan_source(code)
@@ -552,10 +621,10 @@ def page_custom(panel):
             elif chk["warnings"]:
                 st.warning("提示：" + "；".join(chk["warnings"]))
             st.success("注册成功，已自动进入检验流程")
-            # 找出刚注册的因子（模板最后定义的函数名）
-            new_names = [n for n in ns if n.startswith("my_") and callable(ns[n])]
+            # 从注册表差集识别新因子，不依赖名称必须以 my_ 开头。
+            new_names = sorted(set(f.name for f in list_factors()) - before)
             if new_names:
-                name = new_names[-1].replace("def ", "")
+                name = new_names[-1]
                 f = get_factor(name)
                 if f:
                     with st.status("检验中…", expanded=False) as status:
@@ -578,12 +647,16 @@ def page_strategy(panel):
                 '<div class="sub">因子合成 → 组合回测 → 绩效分析 · 一体化流水线</div></div>',
                 unsafe_allow_html=True)
     st.markdown("**① 因子合成**")
-    c1, c2, c3 = st.columns([2, 1, 1])
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     names = c1.multiselect("选择因子", [f.name for f in list_factors()], format_func=factor_label,
                            default=["ep_ttm", "roe", "rev_20"])
-    mode = c2.selectbox("权重模式", ["equal", "ic", "icir"],
-                        format_func=lambda m: {"equal": "等权", "ic": "IC 加权", "icir": "IC_IR 加权"}[m])
+    mode = c2.selectbox("权重模式", ["equal", "ic", "icir", "ic_x_ir"],
+                        format_func=lambda m: {"equal": "等权", "ic": "IC 加权", "icir": "ICIR 加权",
+                                               "ic_x_ir": "IC × IR 加权"}[m])
     horizon = c3.selectbox("前瞻天数", [5, 10, 20, 60], index=2, key="strategy_h")
+    weight_lookback = c4.selectbox("估权回看窗口", [126, 252, 504], index=1,
+                                   disabled=mode == "equal",
+                                   help="仅 IC / IC_IR 权重使用；每次估权都会剔除最近前瞻期，防止未来数据泄漏")
     with st.expander("因子正交化（行业 / 市值 / 风格暴露剥离）"):
         ortho = st.checkbox("启用正交化", value=False,
                             help="逐日截面 OLS 残差化，消除所选暴露（方法论源自 QuantSkills factor-orthogonalize）")
@@ -592,26 +665,134 @@ def page_strategy(panel):
                                                                "style": "风格(beta/波动率)"}[c])
 
     st.markdown("**② 组合回测**")
-    c5, c6, c7 = st.columns([1, 1, 1])
-    top_n = c5.slider("持仓数量", 10, 100, 30, step=5)
+    c5, c6, c7, c8 = st.columns([1, 1, 1, 1])
+    top_n = c5.slider("最多持仓数量", 10, 100, 30, step=5)
     start_d = c6.selectbox("回测起点", ["2021-01-01", "2022-01-01", "2023-01-01"], index=0)
     bench_mode = c7.selectbox("基准", ["equal", "mv"],
                               format_func=lambda m: {"equal": "全池等权", "mv": "市值加权"}[m])
+    rebalance_choice = c8.selectbox(
+        "调仓频率", ["ME", "W-FRI", "QE", "B", "每 N 个交易日"],
+        format_func=lambda r: {"ME": "月末", "W-FRI": "周五", "QE": "季末",
+                               "B": "每日", "每 N 个交易日": "每 N 个交易日"}[r])
+    if rebalance_choice == "每 N 个交易日":
+        rebalance = st.number_input("调仓间隔（交易日）", 2, 250, 20, step=1)
+    else:
+        rebalance = rebalance_choice
+    with st.expander("成交与成本假设（T 日收盘信号 → T+1 开盘成交）"):
+        ca, cb, cc, cd, ce = st.columns(5)
+        commission_bp = ca.number_input("佣金（bp，双边）", 0.0, 30.0, 3.0, 0.5)
+        stamp_bp = cb.number_input("印花税（bp，卖出）", 0.0, 30.0, 5.0, 0.5)
+        impact_bp = cc.number_input("冲击成本（bp，双边）", 0.0, 100.0, 10.0, 1.0)
+        slippage_bp = cd.number_input("滑点（bp，单边）", 0.0, 100.0, 0.0, 1.0,
+                                      help="直接作用于成交价：买入 = 开盘×(1+滑点)，卖出 = 开盘×(1-滑点)。"
+                                           "与冲击成本（按成交额计提的费用）相互独立。")
+        max_participation = ce.slider("单日成交额参与率上限", 0.01, 0.20, 0.05, 0.01)
+        initial_capital = st.number_input("模拟初始资金（元）", 100_000, 1_000_000_000,
+                                          1_000_000, step=100_000)
+        st.caption("模型会阻止停牌、开盘涨停买入与开盘跌停卖出；科创/创业板按 20%、北交所按 30% 近似。")
+        st.warning(
+            "**ST 状态在当前数据源中不存在**，因此回测按普通股票（10%/20%/30% 涨跌幅）处理。"
+            "引擎已支持 `st` 布尔面板（ST 按 5% 涨跌幅且不进入选股目标），"
+            "接入带 ST 标记的数据源后即可生效 —— 现在无法启用，这是数据缺口而非已实现功能。"
+        )
+    with st.expander("组合风险约束（目标组合）"):
+        cr1, cr2 = st.columns(2)
+        max_stock_weight = cr1.slider("单股目标权重上限", 0.01, 1.00, 1.00, 0.01)
+        max_industry_weight = cr2.slider("单行业目标权重上限", 0.01, 1.00, 1.00, 0.01)
+        use_turnover_budget = st.checkbox("限制单次调仓成交额", value=False)
+        max_rebalance_turnover = (
+            st.slider("单次调仓成交额上限（组合净值）", 0.05, 2.00, 0.50, 0.05)
+            if use_turnover_budget else None
+        )
+        st.caption("约束在信号目标组合上生效。上限过严或行业候选不足时会保留现金；涨跌停、停牌和成交额参与率限制可能使实际仓位延后收敛。")
 
     if st.button("运行策略回测", use_container_width=True):
         if not names:
             st.error("至少选择一个因子")
             return
-        from qfm.portfolio import (factor_corr, factor_panel, perf_stats,
-                                   run_backtest, synthesize, yearly_perf)
+        from qfm.portfolio import (PortfolioConstraints, factor_corr, factor_panel,
+                                   run_backtest, standard_metrics, synthesize, yearly_perf)
+        constraints = PortfolioConstraints(
+            max_stock_weight=max_stock_weight,
+            max_industry_weight=max_industry_weight,
+            max_rebalance_turnover=max_rebalance_turnover,
+        )
         with st.status("策略流水线运行中…", expanded=True) as status:
-            score, weights = synthesize(panel, names, mode=mode, horizon=horizon,
-                                        orthogonalize=ortho,
-                                        ortho_controls=tuple(ortho_controls) if ortho else None)
-            status.update(label="✅ 因子合成完成 · 开始组合回测…")
-            bt = run_backtest(panel, score, top_n=top_n, start=start_d, bench_mode=bench_mode)
-            status.update(label=f"✅ 完成：策略净值 {bt.nav.iloc[-1]:.2f} vs 基准 {bt.bench_nav.iloc[-1]:.2f}",
+            costs = {"commission": commission_bp / 10_000,
+                     "stamp": stamp_bp / 10_000,
+                     "impact": impact_bp / 10_000}
+            snapshot = build_data_snapshot(panel, pool)
+            binding = register_panel_dataset(panel, pool, snapshot, root=CATALOG.root)
+            request = {
+                **binding,
+                "universe": pool,
+                "date_range": [start_d, str(panel.close.index.max().date())],
+                "factor_versions": [
+                    {"name": name, "version": get_factor(name).version,
+                     "source_hash": get_factor(name).source_hash}
+                    for name in names
+                ],
+                "pipeline_config": {
+                    "mode": mode, "horizon": horizon, "weight_lookback": weight_lookback,
+                    "orthogonalize": ortho, "ortho_controls": ortho_controls,
+                },
+                "backtest_config": {
+                    "top_n": top_n, "start": start_d, "rebalance": rebalance,
+                    "benchmark": bench_mode, "initial_capital": float(initial_capital),
+                    "max_participation": max_participation, "costs": costs,
+                    "slippage": slippage_bp / 10_000,
+                    "constraints": {
+                        "max_stock_weight": max_stock_weight,
+                        "max_industry_weight": max_industry_weight,
+                        "max_rebalance_turnover": max_rebalance_turnover,
+                    },
+                },
+            }
+
+            def compute_backtest():
+                composite, factor_weights = synthesize(
+                    panel, names, mode=mode, horizon=horizon,
+                    orthogonalize=ortho,
+                    ortho_controls=tuple(ortho_controls) if ortho else None,
+                    weight_lookback=weight_lookback,
+                    weight_rebalance=rebalance,
+                )
+                backtest = run_backtest(
+                    panel, composite, top_n=top_n, start=start_d, rebalance=rebalance,
+                    bench_mode=bench_mode, initial_capital=float(initial_capital),
+                    max_participation=max_participation, cost=costs, constraints=constraints,
+                    slippage=slippage_bp / 10_000,
+                )
+                return composite, factor_weights, backtest
+
+            job_result = JOB_SERVICE.run("BACKTEST", request, compute_backtest)
+            score, weights, bt = job_result.value
+            cache_note = " · 已读取缓存" if job_result.job.cache_hit else ""
+            status.update(label=f"✅ 完成（成本后）：策略净值 {bt.nav.iloc[-1]:.2f} vs 基准 {bt.bench_nav.iloc[-1]:.2f}{cache_note}",
                           state="complete")
+
+        st.session_state["latest_strategy_run"] = build_strategy_run_payload(
+            panel=panel,
+            pool=pool,
+            names=names,
+            mode=mode,
+            horizon=horizon,
+            weight_lookback=weight_lookback,
+            orthogonalize=ortho,
+            ortho_controls=tuple(ortho_controls) if ortho else (),
+            top_n=top_n,
+            start_date=start_d,
+            rebalance=rebalance,
+            bench_mode=bench_mode,
+            costs=costs,
+            max_participation=max_participation,
+            initial_capital=float(initial_capital),
+            weights=weights,
+            backtest=bt,
+        )
+
+        st.caption(f"研究口径：{pool} 股票池 · {start_d} 起 · {('月末' if rebalance == 'ME' else '周五')}调仓 · "
+                   f"T+1 开盘成交 · 成本后净值 · 单日成交额参与率≤{max_participation:.0%}。")
 
         # 权重 + 相关性
         wdf = pd.DataFrame({"因子": [factor_label(n) for n in weights], "权重": list(weights.values())})\
@@ -620,13 +801,19 @@ def page_strategy(panel):
         cw, cc = st.columns([1, 2])
         cw.dataframe(wdf.style.format({"权重": "{:.1%}"}), hide_index=True, use_container_width=True)
         import plotly.graph_objects as go
-        corr = factor_corr(factor_panel(panel, names))
+        corr = factor_corr(factor_panel(panel, names, align_direction=True))
         fig = go.Figure(go.Heatmap(
             z=corr.values, x=corr.columns, y=corr.index, zmin=-1, zmax=1,
             colorscale="Purples", text=corr.round(2), texttemplate="%{text}"))
         fig.update_layout(title="因子截面相关性", height=280, paper_bgcolor="rgba(0,0,0,0)",
                           plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#3B2E5E"))
         cc.plotly_chart(fig, use_container_width=True)
+        if mode != "equal":
+            with st.expander("滚动因子权重（仅使用当时已实现收益）"):
+                wh = score.attrs.get("weight_history")
+                if wh is not None:
+                    st.line_chart(wh.rename(columns={n: factor_label(n) for n in wh.columns}))
+                    st.caption(f"估权窗口：{weight_lookback} 个交易日；每次估权排除最近 {horizon} 日前瞻收益。表格展示末期权重。")
 
         # 净值曲线
         st.markdown("**净值曲线**")
@@ -653,21 +840,25 @@ def page_strategy(panel):
         # 行业暴露
         if bt.industry_exposure is not None and len(bt.industry_exposure):
             st.markdown("**行业暴露（最近调仓日）**")
-            last_expo = bt.industry_exposure.iloc[-1].sort_values(ascending=False)
+            last_expo = bt.industry_exposure.iloc[-1]
+            last_expo = last_expo[last_expo > 1e-6].sort_values(ascending=False)
+            shown_expo = last_expo.head(10).copy()
+            if len(last_expo) > len(shown_expo):
+                shown_expo.loc["其他行业"] = last_expo.iloc[len(shown_expo):].sum()
             figx = go.Figure(go.Bar(
-                x=last_expo.index, y=last_expo.values, marker_color="#7C4DFF",
-                text=last_expo.round(3), texttemplate="%{text:.0%}", textposition="outside"))
+                x=shown_expo.index, y=shown_expo.values, marker_color="#7C4DFF",
+                text=shown_expo.round(3), texttemplate="%{text:.0%}", textposition="outside"))
             figx.update_layout(height=300, margin=dict(t=30), paper_bgcolor="rgba(0,0,0,0)",
                                plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#3B2E5E"),
                                xaxis_tickangle=-30)
             st.plotly_chart(figx, use_container_width=True)
             hhi = float((last_expo ** 2).sum())
             st.caption(f"行业集中度 HHI：**{hhi:.3f}**（1.0=全押一个行业；越低越分散）。"
-                       f"若某行业权重长期偏高，说明策略隐含行业赌注——面试可讲行业中性化作为下一步")
+                       f"图表仅展示非零的前 10 个行业，其余合并；HHI 仍使用全部行业计算。")
 
-        # 绩效指标
+        # 绩效指标（统一走 standard_metrics，与 Tear Sheet / 实验归档同一口径）
         st.markdown("**绩效指标**")
-        stats = perf_stats(bt.nav, bt.bench_nav)
+        stats = standard_metrics(bt.nav, bt.bench_nav, turnover=bt.turnover)
         kcols = st.columns(6)
         kcols[0].metric("总收益", f"{stats.get('总收益', float('nan')):+.1%}")
         kcols[1].metric("年化收益", f"{stats.get('年化收益', float('nan')):+.1%}")
@@ -675,11 +866,70 @@ def page_strategy(panel):
         kcols[3].metric("最大回撤", f"{stats.get('最大回撤', float('nan')):.1%}")
         kcols[4].metric("年化超额", f"{stats.get('年化超额', float('nan')):+.1%}")
         kcols[5].metric("年化换手", f"{bt.turnover:.1f}")
+        kd1, kd2, kd3, kd4 = st.columns(4)
+        kd1.metric("索提诺比率", f"{stats.get('索提诺比率', float('nan')):.2f}")
+        kd2.metric("卡玛比率", f"{stats.get('卡玛比率', float('nan')):.2f}")
+        kd3.metric("信息比率", f"{stats.get('信息比率', float('nan')):.2f}")
+        kd4.metric("跟踪误差", f"{stats.get('跟踪误差', float('nan')):.2%}")
+        if slippage_bp:
+            st.caption(f"成交价已计入单边 {slippage_bp:.0f}bp 滑点（买入抬价、卖出压价），与冲击成本分别记账。")
+        kc1, kc2, kc3 = st.columns(3)
+        kc1.metric("累计交易成本", f"{bt.cost_total:.2%}", help="相对初始资金的已发生佣金、印花税与冲击成本")
+        kc2.metric("成交成本率", f"{bt.cost_pct:.2%}", help="累计成本 / 实际成交额")
+        kc3.metric("期末现金权重", f"{bt.cash_weight.iloc[-1]:.1%}",
+                   help="涨跌停、停牌或参与率限制可能导致部分订单未成交并保留现金")
+
+        if bt.constraint_history is not None and not bt.constraint_history.empty:
+            st.markdown("**组合约束执行**")
+            latest_constraint = bt.constraint_history.iloc[-1]
+            cc1, cc2, cc3, cc4, cc5, cc6 = st.columns(6)
+            cc1.metric("目标现金", f"{latest_constraint['target_cash']:.1%}")
+            cc2.metric("实际现金", f"{latest_constraint['actual_cash']:.1%}")
+            cc3.metric("目标偏离", f"{latest_constraint['target_tracking_error']:.1%}")
+            cc4.metric("实际最大单股", f"{latest_constraint['actual_max_stock_weight']:.1%}")
+            cc5.metric("实际最大行业", f"{latest_constraint['actual_max_industry_weight']:.1%}")
+            cc6.metric(
+                "实际超限",
+                "是" if latest_constraint["stock_cap_exceeded"] or latest_constraint["industry_cap_exceeded"] else "否",
+            )
+            st.caption("“实际超限”是执行日收盘快照；它可能来自涨跌停、停牌、成交参与率限制或开盘到收盘价格变化，并不表示目标构建越过了约束。")
+            with st.expander("组合约束执行记录"):
+                constraint_columns = [
+                    "signal_date", "execution_date", "target_positions", "target_invested", "target_cash",
+                    "target_max_stock_weight", "target_max_industry_weight", "gross_turnover",
+                    "applied_gross_turnover", "turnover_budget", "budget_binding", "turnover_scale",
+                    "actual_invested", "actual_cash", "actual_positions", "actual_max_stock_weight",
+                    "actual_max_industry_weight", "target_tracking_error", "stock_cap_exceeded",
+                    "industry_cap_exceeded",
+                ]
+                st.dataframe(
+                    bt.constraint_history[constraint_columns].style.format({
+                        "target_invested": "{:.1%}", "target_cash": "{:.1%}",
+                        "target_max_stock_weight": "{:.1%}", "target_max_industry_weight": "{:.1%}",
+                        "gross_turnover": "{:.1%}", "applied_gross_turnover": "{:.1%}",
+                        "turnover_budget": "{:.1%}", "turnover_scale": "{:.3f}",
+                        "actual_invested": "{:.1%}", "actual_cash": "{:.1%}",
+                        "actual_max_stock_weight": "{:.1%}", "actual_max_industry_weight": "{:.1%}",
+                        "target_tracking_error": "{:.1%}",
+                    }),
+                    hide_index=True,
+                    use_container_width=True,
+                )
 
         yp = yearly_perf(bt.nav)
         st.markdown("**分年绩效**")
         st.dataframe(yp.style.format({"收益": "{:+.1%}", "最大回撤": "{:.1%}", "日胜率": "{:.0%}"}),
                      hide_index=True, use_container_width=True)
+
+        with st.expander(f"实际成交流水（{len(bt.trades)} 笔）"):
+            if bt.trades.empty:
+                st.info("回测期内没有产生可成交订单。")
+            else:
+                st.dataframe(bt.trades.sort_values("date", ascending=False).style.format(
+                    {"notional": "{:,.0f}", "price": "{:.3f}", "quantity": "{:,.0f}", "cost": "{:,.2f}"}),
+                             hide_index=True, use_container_width=True)
+                st.download_button("⬇ 下载成交流水 CSV", bt.trades.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name="strategy_trades.csv", mime="text/csv")
 
         # 过拟合检验（QuantSkills skill-backtest-overfit 方法论）
         st.markdown("**过拟合检验**（DSR / PBO / Haircut / MinTRL）")
@@ -728,6 +978,8 @@ def page_strategy(panel):
         st.download_button("⬇ 下载净值 CSV", bt.nav.to_csv().encode("utf-8-sig"),
                            file_name="strategy_nav.csv", mime="text/csv")
 
+    render_strategy_save_panel(RESEARCH_STORE)
+
 
 # ---------------------------------------------------------------------------
 # ⑥ 数据管理
@@ -741,7 +993,23 @@ def page_data():
     c1.metric("已缓存日线股票", s["stocks_cached"])
     c2.metric("财务指标缓存", "✅ 已缓存" if s["indicators_cached"] else "❌ 未缓存")
     c3.metric("缓存大小", f"{sum(os.path.getsize(os.path.join(dl.bars_dir, f)) for f in os.listdir(dl.bars_dir) if f.endswith('.parquet')) / 1e6:.0f} MB")
+    c4, c5 = st.columns(2)
+    legacy = s.get("stocks_without_factor", 0)
+    c4.metric("待迁移复权因子", legacy, help="旧版缓存缺少精确复权因子；下次加载会自动重拉")
+    c5.metric("因子库版本快照", "已落盘" if os.path.exists(os.path.join(os.path.dirname(dl.cache_dir), "data_cache", "factors", "registry.json")) else "未落盘")
+    if legacy:
+        st.warning(
+            f"有 {legacy} 只缓存是旧版（缺精确复权因子）。这些股票的真实价与流通市值会偏低，"
+            "规模/价值族因子不可信；加载股票池时会自动重拉完成迁移。"
+        )
     st.divider()
+    col_snap, col_clear_hist = st.columns(2)
+    if col_snap.button("导出因子库版本快照", use_container_width=True,
+                       help="把当前所有因子的版本、公式与定义指纹写到 data_cache/factors/registry.json"):
+        st.success(f"已写入 {save_registry()}")
+    if col_clear_hist.button("清空内存中的研究缓存", use_container_width=True):
+        load_panel.clear()
+        st.success("已清空数据面板缓存（不影响已保存的实验记录）。")
     if st.button("清除日线缓存并重拉", use_container_width=True):
         dl.clear_bars()
         load_panel.clear()
@@ -756,8 +1024,17 @@ def page_data():
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
-if section == "因子库":
+if section == "研究项目":
+    page_research(RESEARCH_STORE,
+                  panel_provider=lambda: load_panel(pool, max_stocks if max_stocks > 0 else None))
+elif section == "因子库":
     page_library()
+elif section == "策略对比":
+    render_strategy_compare(RESEARCH_STORE)
+elif section == "数据与股票池":
+    render_data_catalog(CATALOG)
+elif section == "任务中心":
+    render_job_center(JOB_SERVICE.store)
 elif section == "数据管理":
     page_data()
 else:
@@ -766,6 +1043,10 @@ else:
     panel = load_panel(pool, max_stocks if max_stocks > 0 else None)
     if section == "因子检验":
         page_test(panel)
+    elif section == "因子对比":
+        render_factor_compare(panel, pool, JOB_SERVICE, CATALOG.root)
+    elif section == "多因子实验室":
+        render_multifactor_lab(panel, pool, JOB_SERVICE, COMPOSITE_REGISTRY, CATALOG.root)
     elif section == "自动挖掘":
         page_mine(panel, mine_mode)
     elif section == "自定义因子":

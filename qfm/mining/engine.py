@@ -97,11 +97,13 @@ def _candidate_total(panel, names=None, transforms=None) -> int:
 TRIALS_DIR = str(Path(__file__).resolve().parents[2] / "data_cache" / "trials")
 
 
-def candidate_monthly_returns(panel, fdf: pd.DataFrame, top_n: int = 30) -> pd.Series:
+def candidate_monthly_returns(panel, fdf: pd.DataFrame, top_n: int = 30,
+                              rebalance: str = "ME") -> pd.Series:
     """以候选因子为打分、月末调仓 TOP-N 等权组合的月频收益序列（复用 run_backtest 成本模型）"""
     from qfm.portfolio.backtest import run_backtest
 
-    bt = run_backtest(panel, fdf, top_n=top_n, bench_mode="equal")
+    bt = run_backtest(panel, fdf, top_n=top_n, rebalance=rebalance, bench_mode="equal",
+                      store_holdings=False)
     monthly = bt.nav.resample("ME").last()
     return monthly.pct_change().dropna()
 
@@ -138,6 +140,7 @@ def run_mining(panel, horizon: int = 20, max_candidates: int | None = None,
                progress=None, save_trials: bool = True, top_n: int = 30,
                trials_dir: str | None = None, feature_names=None,
                transforms=None, candidates=None, n_total: int | None = None,
+               rebalance: str = "ME", trial_context: dict | None = None,
                ) -> tuple[pd.DataFrame, dict | None]:
     """批量检验全部候选（v2 流式），返回 (排行榜 DataFrame, 试验矩阵元信息或 None)
 
@@ -176,7 +179,8 @@ def run_mining(panel, horizon: int = 20, max_candidates: int | None = None,
             "无未来函数": "pass（结构安全）",
         })
         if save_trials:
-            trial_series[name] = candidate_monthly_returns(panel, fdf, top_n=top_n)
+            trial_series[name] = candidate_monthly_returns(panel, fdf, top_n=top_n,
+                                                            rebalance=rebalance)
     out = pd.DataFrame(rows)
     if len(out):
         out["|IC|"] = out["IC"].abs()
@@ -185,7 +189,8 @@ def run_mining(panel, horizon: int = 20, max_candidates: int | None = None,
     meta = None
     if save_trials and trial_series:
         matrix = pd.DataFrame(trial_series).dropna(how="all")
-        meta = {"horizon": horizon, "top_n": top_n, "max_candidates": len(rows)}
+        meta = {"horizon": horizon, "top_n": top_n, "max_candidates": len(rows),
+                "rebalance": rebalance, "execution": "next_open", **(trial_context or {})}
         path = save_trials_matrix(matrix, meta, trials_dir)
         meta = {**meta, "path": path, "n_trials": int(matrix.shape[1]),
                 "T_periods": int(matrix.shape[0])}

@@ -3,3 +3,4 @@ __pycache__/
 data_cache/
 *.parquet
 .streamlit/secrets.toml
+.pytest_cache/
