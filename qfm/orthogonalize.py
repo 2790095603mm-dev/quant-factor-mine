@@ -96,18 +96,20 @@ def _mean_exposure(signal: pd.DataFrame, ctrls: list, names: list, min_samples: 
     return float(np.nanmean(arr)) if np.isfinite(arr).any() else float("nan")
 
 
-def orthogonalize(signal: pd.DataFrame, controls: dict[str, pd.DataFrame],
-                  min_samples: int = MIN_SAMPLES) -> tuple[pd.DataFrame, dict]:
-    """逐日截面 OLS 正交化。
+def residualize_frame(signal: pd.DataFrame, controls: dict[str, pd.DataFrame],
+                      min_samples: int = MIN_SAMPLES) -> tuple[pd.DataFrame, dict]:
+    """逐日截面 OLS 正交化，**返回原始残差**（不做截尾/标准化）。
 
-    signal: date×stock 因子信号
+    这是唯一的截面剥离实现：`orthogonalize`（残差再标准化，供正交化页）与
+    `qfm.pipeline` 的中性化阶段都调用它，避免出现多套互相不一致的 OLS。
+
     controls: {控制名: date×stock DataFrame}（industry 须为展开后的 one-hot 矩阵）
-    返回 (残差因子 date×stock, 诊断 dict)
+    返回 (残差 date×stock, 诊断 dict)。样本不足的交易日残差为 NaN。
     """
     if not controls:
+        flat = float(signal.notna().mean().mean())
         return signal.copy(), {"controls": [], "days": 0, "days_skipped": 0,
-                               "coverage_before": float(signal.notna().mean().mean()),
-                               "coverage_after": float(signal.notna().mean().mean()),
+                               "coverage_before": flat, "coverage_after": flat,
                                "exposure_before": float("nan"), "exposure_after": float("nan")}
     names = list(controls)
     ctrls = list(controls.values())
@@ -117,7 +119,7 @@ def orthogonalize(signal: pd.DataFrame, controls: dict[str, pd.DataFrame],
         x = pd.concat([c.loc[dt].rename(n) for n, c in zip(names, ctrls)], axis=1)
         r = _regress_out(signal.loc[dt], x, min_samples)
         if r.notna().any():
-            resid.loc[dt] = winsorize_zscore(r)
+            resid.loc[dt] = r
             days_done += 1
         else:
             resid.loc[dt] = np.nan
@@ -132,6 +134,28 @@ def orthogonalize(signal: pd.DataFrame, controls: dict[str, pd.DataFrame],
         "exposure_after": _mean_exposure(resid, ctrls, names, min_samples),
     }
     return resid, diag
+
+
+def orthogonalize(signal: pd.DataFrame, controls: dict[str, pd.DataFrame],
+                  min_samples: int = MIN_SAMPLES) -> tuple[pd.DataFrame, dict]:
+    """逐日截面 OLS 正交化 + 残差重标准化（5MAD 截尾 → z-score）。
+
+    行为与历史版本一致；残差的原始回归由 `residualize_frame` 承担。
+    返回 (残差因子 date×stock, 诊断 dict)
+    """
+    resid, diag = residualize_frame(signal, controls, min_samples)
+    if not controls:
+        return resid, diag
+    out = resid.copy()
+    for dt in signal.index:
+        if resid.loc[dt].notna().any():
+            out.loc[dt] = winsorize_zscore(resid.loc[dt])
+        else:
+            out.loc[dt] = np.nan
+    # 重标准化不改变非空模式，也不改变线性回归 R²；此处仅按最终残差复核一遍
+    diag["coverage_after"] = float(out.notna().mean().mean())
+    diag["exposure_after"] = _mean_exposure(out, list(controls.values()), list(controls), min_samples)
+    return out, diag
 
 
 def orthogonalize_factor(panel, signal: pd.DataFrame, controls=("industry", "size", "style"),

@@ -56,7 +56,7 @@ def layer_chart(report: dict, direction: str) -> go.Figure:
         marker_color=colors, text=layer["mean_ret"].round(4),
         textposition="outside",
     ))
-    fig.update_layout(title="分层收益（未来{}日，L1最低因子值~L{}最高）".format(
+    fig.update_layout(title="分层收益（未来{}日，L1低分~L{}高分；已统一方向）".format(
         report["horizon"], len(layer)), height=340, yaxis_title="平均收益")
     return _fig_style(fig)
 
