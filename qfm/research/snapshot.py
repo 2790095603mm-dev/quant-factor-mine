@@ -9,11 +9,13 @@ import numpy as np
 import pandas as pd
 
 from qfm.data.panel import DataPanel
+from qfm.data.universe import CURRENT_SNAPSHOT_SOURCE
 
 
-SNAPSHOT_VERSION = 2
-MARKET_FIELDS = ("open", "high", "low", "close", "volume", "amount", "turnover", "mv_float")
-MARKET_SOURCE = "akshare:sina-qfq"
+SNAPSHOT_VERSION = 3
+# factor（精确复权因子）参与指纹：它决定真实价与流通市值，口径变化必须改变指纹
+MARKET_FIELDS = ("open", "high", "low", "close", "volume", "amount", "turnover", "mv_float", "factor")
+MARKET_SOURCE = "akshare:sina-qfq+raw"
 FUNDAMENTAL_SOURCE = "akshare:eastmoney-yjbb"
 
 
@@ -82,7 +84,11 @@ def _digest(hasher: Any) -> str:
     return f"sha256:{hasher.hexdigest()}"
 
 
-def _quality_warnings(coverage: dict[str, Any]) -> list[str]:
+def _quality_warnings(
+    coverage: dict[str, Any],
+    effective: dict[str, int],
+    membership_source: str,
+) -> list[str]:
     warnings: list[str] = []
     labels = {"close": "收盘价", "open": "开盘价", "amount": "成交额"}
     for key, label in labels.items():
@@ -93,11 +99,30 @@ def _quality_warnings(coverage: dict[str, Any]) -> list[str]:
         warnings.append("未记录可用行业归属；行业暴露审核与行业约束无法复现。")
     if not coverage["fundamentals"]:
         warnings.append("未记录可用财务字段；基本面因子的输入无法复核。")
+    total = effective["max"]
+    if total and effective["min"] < 0.5 * total:
+        warnings.append(
+            f"每日有效股票数在 {effective['min']} ~ {total} 之间波动（首日 {effective['first_date_count']} 只）；"
+            "早期截面样本显著少于总池，规模/流动性等横截面因子的历史结论需谨慎解读。"
+        )
+    if membership_source == CURRENT_SNAPSHOT_SOURCE:
+        warnings.append(
+            "股票池为**当前**指数成分股快照，不含历史成分股变动；存在幸存者偏差与成分股调整前视，"
+            "本记录无法消除该偏差。接入 data_cache/membership_<pool>.json 后才按真实生效区间过滤。"
+        )
     return warnings
 
 
-def build_data_snapshot(panel: DataPanel, pool: str) -> dict[str, object]:
-    """从当次回测面板构造可持久化、无需网络的审计快照。"""
+def build_data_snapshot(
+    panel: DataPanel,
+    pool: str,
+    membership_source: str = CURRENT_SNAPSHOT_SOURCE,
+) -> dict[str, object]:
+    """从当次回测面板构造可持久化、无需网络的审计快照。
+
+    membership_source 记录股票池的时点性来源（当前成分股快照 / 显式成员区间文件），
+    使"这次回测用的是哪种池"可审计。
+    """
     if panel.close.empty:
         raise ValueError("无法构建数据快照：收盘价面板为空")
 
@@ -140,14 +165,26 @@ def build_data_snapshot(panel: DataPanel, pool: str) -> dict[str, object]:
         _update_frame(fundamentals_hasher, f"fund:{name}", frame, present)
 
     universe_hasher = _new_hasher("universe", dates, codes)
+
+    # 每日实际参与截面的股票数：反映"总池"与"当日可用样本"的差距（含未上市/无数据）
+    counts = market_frames["close"][0].notna().sum(axis=1)
+    effective = {
+        "min": int(counts.min()),
+        "median": int(counts.median()),
+        "max": int(counts.max()),
+        "first_date_count": int(counts.iloc[0]),
+    }
+
     return {
         "snapshot_version": SNAPSHOT_VERSION,
         "pool": str(pool),
+        "membership_source": str(membership_source),
         "stocks": len(codes),
         "trading_days": len(dates),
         "data_start": dates.min().isoformat(),
         "data_end": dates.max().isoformat(),
         "stock_codes": codes,
+        "effective_cross_section": effective,
         "universe_fingerprint": _digest(universe_hasher),
         "sources": {"market": MARKET_SOURCE, "fundamentals": FUNDAMENTAL_SOURCE},
         "coverage": coverage,
@@ -155,5 +192,5 @@ def build_data_snapshot(panel: DataPanel, pool: str) -> dict[str, object]:
             "market": _digest(market_hasher),
             "fundamentals": _digest(fundamentals_hasher),
         },
-        "quality_warnings": _quality_warnings(coverage),
+        "quality_warnings": _quality_warnings(coverage, effective, membership_source),
     }

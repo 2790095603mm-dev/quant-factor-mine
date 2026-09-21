@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from qfm.data.universe import CURRENT_SNAPSHOT_SOURCE
 from qfm.portfolio import BacktestResult
 from qfm.research.payload import build_strategy_run_payload
 
@@ -60,7 +61,8 @@ def test_strategy_payload_records_execution_assumptions(panel):
 
     assert payload["data_snapshot"]["pool"] == "index800"
     assert payload["data_snapshot"]["stocks"] == panel.close.shape[1]
-    assert payload["data_snapshot"]["snapshot_version"] == 2
+    assert payload["data_snapshot"]["snapshot_version"] == 3
+    assert payload["data_snapshot"]["membership_source"] == CURRENT_SNAPSHOT_SOURCE
     assert payload["data_snapshot"]["stock_codes"][0] == "600000"
     assert payload["data_snapshot"]["fingerprints"]["market"].startswith("sha256:")
     assert payload["data_snapshot"]["coverage"]["fundamentals"]["roe"] == 1.0

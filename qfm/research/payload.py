@@ -1,15 +1,25 @@
 """将策略计算结果整理为可持久化、JSON 安全的研究运行载荷。"""
-
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
 
+from qfm.data.catalog import register_panel_dataset
+from qfm.factors import factor_definitions as build_factor_definitions
 from qfm.portfolio import BacktestResult, perf_stats, yearly_perf
 from qfm.research.snapshot import build_data_snapshot
+
+# 代码侧口径版本：不依赖 git，但足以判断"两次运行的算法是否同一版"
+CODE_VERSION = {
+    "pipeline": "stages_v1(missing→winsorize→neutralize→standardize→direction→decay→lag)",
+    "metrics": "perf_stats_v1",
+    "adjustment": "qfq_with_exact_factor_v1",
+    "execution": "next_open",
+}
 
 
 def _json_safe(value: Any) -> Any:
@@ -50,8 +60,17 @@ def build_strategy_run_payload(
     initial_capital: float,
     weights: dict[str, float],
     backtest: BacktestResult,
+    pipeline_config: dict[str, Any] | None = None,
+    membership_source: str | None = None,
+    extra_config: dict[str, Any] | None = None,
+    catalog_root: Path | str | None = None,
+    universe_id: str | None = None,
 ) -> dict[str, Any]:
-    """构造一次已完成策略回测的可保存载荷，不触发任何重新计算。"""
+    """构造一次已完成策略回测的可保存载荷，不触发任何重新计算。
+
+    `config["factors"]` 存的是**因子定义对象**（name/version/source_hash/…）而不是裸名字：
+    只有这样，"复现同一次实验"才能知道当时用的是哪个版本的因子定义。
+    """
     stats = perf_stats(backtest.nav, backtest.bench_nav)
     summary = {
         **stats,
@@ -62,8 +81,9 @@ def build_strategy_run_payload(
         "成交成本率": float(backtest.cost_pct),
         "成交笔数": int(len(backtest.trades)),
     }
+    definitions = build_factor_definitions(list(names))
     config = {
-        "factors": list(names),
+        "factors": definitions,
         "weight_mode": mode,
         "signal_horizon": horizon,
         "weight_lookback": weight_lookback,
@@ -78,8 +98,25 @@ def build_strategy_run_payload(
         "initial_capital": initial_capital,
         "execution": backtest.params.get("execution", "next_open"),
         "portfolio_constraints": dict(backtest.params.get("constraints", {})),
+        "code_version": dict(CODE_VERSION),
     }
-    data_snapshot = build_data_snapshot(panel, pool)
+    if pipeline_config is not None:
+        config["pipeline"] = dict(pipeline_config)
+    if extra_config:
+        config.update(dict(extra_config))
+    data_snapshot = build_data_snapshot(
+        panel, pool,
+        **({"membership_source": membership_source} if membership_source else {}),
+    )
+    data_snapshot.update(
+        register_panel_dataset(
+            panel,
+            universe_id or pool,
+            data_snapshot,
+            root=catalog_root,
+            universe_symbols=panel.close.columns,
+        )
+    )
     factor_weights = pd.DataFrame.from_dict(weights, orient="index", columns=["weight"])
     factor_weights.index.name = "factor"
     constraint_history = (
@@ -97,4 +134,5 @@ def build_strategy_run_payload(
         "yearly_performance": yearly_perf(backtest.nav),
         "trades": backtest.trades.copy(),
         "constraint_history": constraint_history,
+        "factor_definitions": definitions,
     }

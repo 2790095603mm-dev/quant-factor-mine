@@ -6,18 +6,31 @@ from qfm.portfolio.constraints import (
     apply_turnover_budget,
     constrained_target_weights,
 )
-from qfm.portfolio.performance import drawdown, perf_stats, summary_table, yearly_perf
+from qfm.portfolio.performance import (
+    SUMMARY_METRICS,
+    drawdown,
+    perf_stats,
+    sortino_ratio,
+    standard_metrics,
+    summary_table,
+    tracking_error,
+    yearly_perf,
+)
 from qfm.portfolio.synthesis import factor_corr, factor_panel, synthesize
 
 __all__ = [
     "BacktestResult",
     "PortfolioConstraints",
+    "SUMMARY_METRICS",
     "apply_turnover_budget",
     "constrained_target_weights",
     "run_backtest",
     "drawdown",
     "perf_stats",
+    "sortino_ratio",
+    "standard_metrics",
     "summary_table",
+    "tracking_error",
     "yearly_perf",
     "factor_corr",
     "factor_panel",
