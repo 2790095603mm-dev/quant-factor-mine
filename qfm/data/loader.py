@@ -1,6 +1,9 @@
 """数据层：akshare 拉取 + parquet 本地缓存
 
-- 日线行情：新浪 qfq（东财接口在本环境被拦截，新浪已验证可用）
+- 日线行情：新浪 qfq + 不复权双拉（东财接口在本环境被拦截，新浪已验证可用）
+- 复权口径：OHLC 存前复权价，另存精确复权因子 `factor = close_qfq / close_raw`；
+  volume / amount / outstanding_share / turnover 两个接口返回值完全一致，均为真实现值。
+  日内 OHLC 共享同一 factor，因此真实价一律由 `价 / factor` 还原（见 panel.raw_price）。
 - 财务指标：东财业绩报表（季度全市场，按公告日对齐防未来函数）
 - 缓存：data_cache/ 下按股票缓存 parquet，二次加载秒级
 """
@@ -26,6 +29,9 @@ SINA_COLS = {
     "outstanding_share": "outstanding_share",
     "turnover": "turnover",
 }
+
+# 缓存 parquet 的必需列；缺 factor 视为旧版缓存，需重拉
+CACHE_COLUMNS = [*SINA_COLS.values(), "factor"]
 
 # 业绩报表列 → 标准字段
 YJBB_COLS = {
@@ -76,40 +82,97 @@ class DataLoader:
         os.makedirs(self.bars_dir, exist_ok=True)
 
     # ---------- 日线行情 ----------
-    def load_bars(self, codes: list, progress=None) -> pd.DataFrame:
-        """拉取/读取多只股票日线，返回长表 [date, stock, open, high, low, close, volume, amount, outstanding_share, turnover]"""
+    def load_bars(self, codes: list, progress=None, refresh: bool = False) -> pd.DataFrame:
+        """拉取/读取多只股票日线，返回长表
+
+        [date, stock, open, high, low, close, volume, amount, outstanding_share, turnover, factor]
+
+        refresh=False（默认）命中缓存即返回；refresh=True 重新拉取并与缓存合并
+        （按日期去重、保留本次结果），用于增量更新到最新交易日。
+        旧版缓存（缺 factor 列）无论 refresh 取值都会重拉，以完成口径迁移。
+        """
         frames = []
         n = len(codes)
         for i, code in enumerate(codes):
             if progress:
                 progress(i, n, code)
             path = os.path.join(self.bars_dir, f"{code}.parquet")
-            if os.path.exists(path):
-                df = pd.read_parquet(path)
+            cached = None if refresh else self._read_cache(path)
+            if cached is not None:
+                df = cached
             else:
-                df = self._fetch_one(code)
-                if df is not None and len(df):
+                fetched = self._fetch_one(code)
+                if fetched is not None and len(fetched):
+                    df = self._merge_cache(path, fetched)
                     df.to_parquet(path)
                 else:
-                    df = pd.DataFrame(columns=list(SINA_COLS))
+                    df = pd.DataFrame(columns=CACHE_COLUMNS)
+            if df.empty:
+                continue
             frames.append(df.assign(stock=code))
             if (i + 1) % 50 == 0:
                 time.sleep(0.2)  # 温和限速，避免被源站限流
         if not frames:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=[*CACHE_COLUMNS, "stock"])
         out = pd.concat(frames, ignore_index=True)
         out["date"] = pd.to_datetime(out["date"])
         return out.sort_values(["date", "stock"]).reset_index(drop=True)
 
+    @staticmethod
+    def _read_cache(path: str) -> pd.DataFrame | None:
+        """读取缓存；缺 factor 列的旧版缓存返回 None（触发重拉迁移）。"""
+        if not os.path.exists(path):
+            return None
+        try:
+            df = pd.read_parquet(path)
+        except (OSError, ValueError):
+            return None
+        return df if "factor" in df.columns else None
+
+    @staticmethod
+    def _merge_cache(path: str, fetched: pd.DataFrame) -> pd.DataFrame:
+        """增量合并：已有缓存 + 本次拉取，按日期去重且以本次结果为准。"""
+        cached = None
+        if os.path.exists(path):
+            try:
+                old = pd.read_parquet(path)
+                if "factor" in old.columns:
+                    cached = old
+            except (OSError, ValueError):
+                cached = None
+        if cached is None or cached.empty:
+            return fetched
+        merged = pd.concat([cached, fetched], ignore_index=True)
+        merged["date"] = pd.to_datetime(merged["date"])
+        return (
+            merged.drop_duplicates(subset=["date"], keep="last")
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+
     def _fetch_one(self, code: str, retries: int = 3) -> pd.DataFrame | None:
-        """单只股票日线（新浪 qfq），失败重试，最终失败返回 None"""
+        """单只股票日线：前复权 + 不复权双拉，算精确复权因子
+
+        factor = 前复权收盘价 / 真实收盘价。日内 OHLC 共享同一因子，
+        故真实价 = 前复权价 / factor。volume 等字段两接口一致，取前复权侧即可。
+        失败重试，最终失败返回 None。
+        """
+        symbol = _sina_symbol(code)
         for attempt in range(retries):
             try:
-                df = ak.stock_zh_a_daily(symbol=_sina_symbol(code), adjust="qfq")
-                if df is None or df.empty:
+                qfq = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+                if qfq is None or qfq.empty:
                     return None
-                df = df.rename(columns=SINA_COLS)[list(SINA_COLS.values())]
-                return df
+                raw = ak.stock_zh_a_daily(symbol=symbol, adjust="")
+                if raw is None or raw.empty:
+                    return None
+                qfq = qfq.rename(columns=SINA_COLS)[list(SINA_COLS.values())]
+                raw = raw[["date", "close"]].rename(columns={"close": "close_raw"})
+                df = qfq.merge(raw, on="date", how="left")
+                raw_close = df["close_raw"].replace(0, pd.NA)
+                df["factor"] = (df["close"] / raw_close).astype(float)
+                df = df.drop(columns=["close_raw"])
+                return df[CACHE_COLUMNS]
             except Exception as e:  # noqa: BLE001
                 if attempt == retries - 1:
                     print(f"[loader] {code} 拉取失败: {e}")
@@ -151,8 +214,28 @@ class DataLoader:
     # ---------- 数据状态 ----------
     def status(self) -> dict:
         bars = [f for f in os.listdir(self.bars_dir) if f.endswith(".parquet")]
+        legacy = 0
+        try:
+            from pyarrow.parquet import ParquetFile
+        except ImportError:  # pandas 也可使用 fastparquet；保留兼容回退
+            ParquetFile = None
+        for name in bars:
+            path = os.path.join(self.bars_dir, name)
+            try:
+                # 这里只校验 schema，不把 799 份多年行情读进内存。
+                cols = ParquetFile(path).schema.names if ParquetFile else pd.read_parquet(path).columns
+            except (OSError, ValueError):
+                legacy += 1
+                continue
+            if "factor" not in cols:
+                legacy += 1
         ind = os.path.exists(os.path.join(self.cache_dir, "indicators.parquet"))
-        return {"stocks_cached": len(bars), "indicators_cached": ind}
+        return {
+            "stocks_cached": len(bars),
+            "indicators_cached": ind,
+            # 旧版缓存（无复权因子）数量；>0 时下次加载会自动重拉完成口径迁移
+            "stocks_without_factor": legacy,
+        }
 
     def clear_bars(self):
         for f in os.listdir(self.bars_dir):
