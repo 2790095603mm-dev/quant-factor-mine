@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from qfm.data import DataCatalog, DataLoader, build_panel, get_universe, register_panel_dataset
+from qfm.agent.views import render_agent_page
 from qfm.data.catalog_views import render_data_catalog
 from qfm.factors import (
     all_tags,
@@ -193,7 +194,7 @@ def verdict_of(rep: dict) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 st.sidebar.markdown("## 量化因子挖掘流水线")
 section = st.sidebar.radio("操作台", [
-    "研究项目", "因子库", "因子检验", "因子对比", "多因子实验室",
+    "研究助理", "研究项目", "因子库", "因子检验", "因子对比", "多因子实验室",
     "自动挖掘", "自定义因子", "策略回测", "策略对比",
     "数据与股票池", "任务中心", "数据管理",
 ],
@@ -1024,7 +1025,17 @@ def page_data():
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
-if section == "研究项目":
+if section == "研究助理":
+    # 放在不加载面板的分支：Agent 自己按行业/指数解析股票池，
+    # 不该被侧边栏的 index800 强制先加载 800 只股票。
+    render_agent_page(
+        runs_root=str(Path(__file__).resolve().parent / "reports" / "agent_runs"),
+        data_dir=str(Path(__file__).resolve().parent / "data_cache"),
+        store=RESEARCH_STORE,
+        jobs=JOB_SERVICE,
+        catalog_root=CATALOG.root,
+    )
+elif section == "研究项目":
     page_research(RESEARCH_STORE,
                   panel_provider=lambda: load_panel(pool, max_stocks if max_stocks > 0 else None))
 elif section == "因子库":

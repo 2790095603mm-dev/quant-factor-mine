@@ -83,3 +83,76 @@ def wide_panel() -> DataPanel:
         },
         fund_names=["roe", "eps_ttm", "bvps"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent 层夹具：全部离线（合成面板 + 注入的休眠/时钟），零网络、零数据缓存依赖
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def synthetic_spec():
+    """固定种子的合成面板参数：同种子必然同面板，保证测试可复现。"""
+    from qfm.agent.synthetic import SyntheticSpec
+
+    return SyntheticSpec(as_of="2026-09-18", n_days=620, seed=20260928)
+
+
+@pytest.fixture(scope="session")
+def synthetic_provider(synthetic_spec):
+    from qfm.agent.providers import SyntheticProvider
+
+    return SyntheticProvider(synthetic_spec)
+
+
+@pytest.fixture(scope="session")
+def bank_symbols(synthetic_provider):
+    """合成面板里的银行股代码（42 只，与真实缓存里的数量一致）。"""
+    from qfm.agent.providers import build_industry_series
+
+    panel = synthetic_provider.load("synthetic").panel
+    series = build_industry_series(panel)
+    return sorted(series[series == "银行Ⅱ"].index.tolist())
+
+
+@pytest.fixture()
+def tool_context(tmp_path, synthetic_provider):
+    """一个可直接调工具的上下文，产物写到 tmp_path。"""
+    from pathlib import Path
+
+    from qfm.agent.registry import ToolContext
+
+    return ToolContext(
+        workdir=tmp_path / "run",
+        data_dir=Path("data_cache"),
+        provider=synthetic_provider,
+    )
+
+
+@pytest.fixture()
+def registry():
+    from qfm.agent.tools import build_default_registry
+
+    return build_default_registry()
+
+
+@pytest.fixture()
+def quick_runtime(tmp_path, synthetic_provider, registry):
+    """不真实等待退避的运行时，用于端到端测试。"""
+    from qfm.agent.planner import RulePlanner
+    from qfm.agent.runtime import AgentConfig, AgentRuntime
+    from qfm.agent.retry import RetryPolicy
+
+    def build(**overrides):
+        config = AgentConfig(
+            retry=RetryPolicy(max_attempts=2, base_delay=0.0, jitter=0.0),
+            **overrides,
+        )
+        return AgentRuntime(
+            registry,
+            RulePlanner(),
+            config,
+            provider=synthetic_provider,
+            runs_root=tmp_path / "runs",
+            sleep=lambda seconds: None,
+        )
+
+    return build

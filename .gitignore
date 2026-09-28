@@ -4,3 +4,6 @@ data_cache/
 *.parquet
 .streamlit/secrets.toml
 .pytest_cache/
+
+# Agent 运行记录：含绝对路径与中间产物，属生成内容
+reports/agent_runs/
